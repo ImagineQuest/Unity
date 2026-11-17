@@ -1,0 +1,2687 @@
+using System;
+using System.Collections.Generic;
+using System.Collections;
+using System.Threading.Tasks;
+using ImagineQuest.Characters;
+using Firebase.Auth;
+using Firebase.Firestore;
+using TMPro;
+using UnityEngine;
+using UnityEngine.EventSystems;
+using UnityEngine.InputSystem;
+using UnityEngine.InputSystem.UI;
+using UnityEngine.UI;
+using UnityEngine.SceneManagement;
+using ImagineQuest.QuestFramework;
+
+namespace ImagineQuest.Gameplay
+{
+    /// <summary>
+    /// The first full Imagine Quest learning adventure. The scene deliberately builds its
+    /// presentation at runtime so the gameplay is portable while the art team iterates on
+    /// a dedicated ship scene. It uses the migrated ship/pirate assets when they are
+    /// assigned by the companion editor setup command.
+    /// </summary>
+    public sealed class CelestialClockQuestBootstrap : MonoBehaviour
+    {
+        private const string QuestTitle = "QUEST ARENA  •  THE RIDDLE OF THE CELESTIAL CLOCK";
+        private const int RequiredSealsBeforeFinale = 3;
+        private static readonly Color ArenaSoot = new Color(.105f, .075f, .055f, .98f);
+        private static readonly Color ArenaBrass = new Color(.76f, .53f, .26f);
+        private static readonly Color ArenaLeather = new Color(.27f, .16f, .095f);
+        private static readonly Color ArenaCream = new Color(.94f, .93f, .85f);
+        private static readonly Color ArenaGold = new Color(1f, .73f, .32f);
+        private static readonly Color ArenaHaze = new Color(.065f, .105f, .16f);
+
+        [Header("Ship hub")]
+        [SerializeField] private bool arenaOnly;
+        [SerializeField] private string dummyQuestVideoUrl = "https://www.youtube.com/watch?v=zQ8caaUxIvY";
+        private Transform questChart;
+        private GameObject questChartMarker;
+
+        [Header("Quest video placeholders (YouTube requires embedded browser)")]
+        [SerializeField] private string openingVideoUrl = "https://www.youtube.com/watch?v=zQ8caaUxIvY";
+        [SerializeField] private string teachingVideoUrl = "https://www.youtube.com/watch?v=zQ8caaUxIvY";
+        [SerializeField] private string completionVideoUrl = "https://www.youtube.com/watch?v=zQ8caaUxIvY";
+        [SerializeField] private string sailFractionVideoUrl = "https://www.youtube.com/watch?v=zQ8caaUxIvY";
+        [SerializeField] private string compassAngleVideoUrl = "https://www.youtube.com/watch?v=zQ8caaUxIvY";
+        [SerializeField] private string starEquationVideoUrl = "https://www.youtube.com/watch?v=zQ8caaUxIvY";
+        [SerializeField] private string celestialClockVideoUrl = "https://www.youtube.com/watch?v=zQ8caaUxIvY";
+        private UrlVideoSequencePlayer questVideo;
+        private bool videoVisible;
+
+        [Header("Migrated visual assets")]
+        [SerializeField] private GameObject colonialShipPrefab;
+        [SerializeField] private GameObject pirateCaptainPrefab;
+        [SerializeField] private GameObject[] piratePlayerPrefabs;
+        [SerializeField] private GameObject treasureChestPrefab;
+        [SerializeField] private Avatar pirateHumanoidAvatar;
+        [SerializeField] private RuntimeAnimatorController pirateLocomotionController;
+        [SerializeField] private UnityEngine.Rendering.RenderPipelineAsset arenaPipeline;
+        private UnityEngine.Rendering.RenderPipelineAsset previousPipeline;
+        [SerializeField] private Material arenaWater;
+        [SerializeField] private Material interactableOutline;
+        [SerializeField] private AudioClip arenaMusic;
+        [SerializeField] private QuestDefinition questDefinition;
+        [SerializeField, Range(0.15f, 0.5f)] private float shipScale = 0.28f;
+
+        [Header("Comfort and presentation")]
+        [SerializeField, Range(0.05f, 0.3f)] private float lookSensitivity = 0.1f;
+        [SerializeField, Range(0.8f, 3f)] private float moveSpeed = 1.4f;
+        private readonly List<Collider> deckSurfaces = new List<Collider>();
+        private Transform shipRoot;
+
+        private readonly List<CelestialClockStation> stations = new List<CelestialClockStation>();
+        private readonly List<Button> answerButtons = new List<Button>();
+        private readonly List<string> completedNodeIds = new List<string>();
+
+        private CelestialClockPlayerController playerController;
+        private CelestialClockStation activeStation;
+        private TMP_Text objectiveText;
+        private TMP_Text sealText;
+        private TMP_Text xpText;
+        private TMP_Text interactionText;
+        private TMP_Text journalText;
+        private TMP_Text journalTitleText;
+        private GameObject briefingPanel;
+        private TMP_Text briefingSpeakerText;
+        private TMP_Text briefingBodyText;
+        private TMP_Text briefingStepText;
+        private Button briefingPrimaryButton;
+        private GameObject lessonPanel;
+        private TMP_Text lessonEyebrowText;
+        private TMP_Text lessonTitleText;
+        private TMP_Text lessonBodyText;
+        private TMP_Text lessonFeedbackText;
+        private Button lessonPrimaryButton;
+        private Button lessonSecondaryButton;
+        private GameObject journalPanel;
+        private GameObject pausePanel;
+        private ImagineQuest.Student.StudentStatusView personalStatus;
+        private GameObject completionPanel;
+        private TMP_Text completionSummaryText;
+        private GameObject questPickerPanel;
+        private PirateAvatarStyler playerStyler;
+        private ImagineQuest.Characters.StudentCharacterAvatar playerAvatar;
+        private bool appearanceLoading;
+        private int appearanceRequest;
+        private bool briefingVisible;
+        private bool lessonVisible;
+        private bool journalVisible;
+        private bool pauseVisible;
+        private bool questComplete;
+        private int briefingIndex;
+        private int provisionalXp;
+
+        private readonly DialogueLine[] briefingLines =
+        {
+            new DialogueLine("CAPTAIN ESME", "The Celestial Clock has fallen silent. Without it, the Aurora cannot find the next learning isle."),
+            new DialogueLine("CAPTAIN ESME", "Four glowing seals keep its gears in motion. Each one opens only when a careful thinker gives it the right answer."),
+            new DialogueLine("FIRST MATE LUMA", "Every station has a Teaching Note before its practice. Read it, try bravely, and use the journal whenever you need a refresher."),
+            new DialogueLine("CAPTAIN ESME", "No rush, navigator. Restore the seals, wake the clock, and chart a course through the stars.")
+        };
+
+        private void Awake()
+        {
+            appearanceLoading=Environment.GetEnvironmentVariable("IMAGINEQUEST_OFFLINE_TESTS")!="1" && !StudentAvatarIdentity.HasVerifiedCache;
+            // Also recognize the scene by name when an already-open editor instance
+            // still has the old serialized component values after a script reload.
+            arenaOnly = arenaOnly || gameObject.scene.name == "QuestArena";
+            if (!arenaOnly)
+            {
+                EnsurePersistence();
+                ValidateContentDefinition();
+            }
+            ConfigureAtmosphere();
+            BuildWorld();
+            BuildInterface();
+        }
+
+        private void Start()
+        {
+            _=RefreshStudentAppearanceAsync();
+            if (arenaOnly) StartCoroutine(ArriveOnShip());
+            else
+            {
+                BeginExploration();
+            }
+            if (arenaMusic != null)
+            {
+                if (AudioManager.Instance == null)
+                    new GameObject("Audio Manager").AddComponent<AudioManager>();
+                AudioManager.Instance.PlayMusic(arenaMusic, 0.55f);
+            }
+        }
+
+        private void OnDestroy()
+        {
+            if (arenaPipeline != null && QualitySettings.renderPipeline == arenaPipeline)
+                QualitySettings.renderPipeline = previousPipeline;
+        }
+
+        private void OnEnable() => StudentAvatarIdentity.Changed+=ApplyStudentAppearance;
+        private void OnDisable() {StudentAvatarIdentity.Changed-=ApplyStudentAppearance;++appearanceRequest;}
+
+        private bool arrivingOnShip;
+
+        private IEnumerator ArriveOnShip()
+        {
+            arrivingOnShip = true;
+            playerController.SetInputEnabled(false);
+            Cursor.lockState = CursorLockMode.Locked;
+            Cursor.visible = false;
+            bool handoff = SceneTransition.IsTransitioning;
+            if (handoff) playerController.SetArrivalProgress(0);
+            while (SceneTransition.IsTransitioning) yield return null;
+            yield return QuestArrival.Play(transform, "THE AURORA", "QUEST ARENA", playerController.SetArrivalProgress, handoff);
+            arrivingOnShip = false;
+            BeginExploration();
+        }
+
+        public async Task RefreshStudentAppearanceAsync(IAppearanceRepository source=null)
+        {
+            if(source==null && Environment.GetEnvironmentVariable("IMAGINEQUEST_OFFLINE_TESTS")=="1") return;
+            bool initializeAccount=source==null;
+            int version=++appearanceRequest;
+            try
+            {
+                if(source==null)
+                {
+                    var connection=FirebaseAppearanceRepository.Connect();
+                    if(await Task.WhenAny(connection,Task.Delay(20000))!=connection) {_=ObserveAppearanceRead(connection);throw new TimeoutException();}
+                    source=await connection;
+                }
+                if(this==null || version!=appearanceRequest || !source.IsCurrent) return;
+                // Authentication is now initialized, so even a failed network read uses
+                // this account's cache rather than the guest/default preview character.
+                if(initializeAccount)
+                {
+                    ApplyStudentAppearance();
+                    if(source.IsLocal || StudentAvatarIdentity.HasVerifiedCache)
+                    {appearanceLoading=false;SetPlayerAppearanceVisible(true);playerController?.RefreshCharacterAnimator();}
+                }
+                var load=source.LoadAsync();
+                if(await Task.WhenAny(load,Task.Delay(15000))!=load) {_=ObserveAppearanceRead(load);throw new TimeoutException();}
+                string saved=await load;
+                if(this==null || version!=appearanceRequest || !source.IsCurrent) return;
+                ApplyAppearance(StudentAppearance.FromAvatarId(saved));
+            }
+            catch (Exception)
+            {
+                Debug.LogWarning("[Quest Arena] Saved appearance unavailable; using this account's cached or default skin.");
+            }
+            finally
+            {
+                if(this!=null && version==appearanceRequest)
+                {appearanceLoading=false;SetPlayerAppearanceVisible(true);playerController?.RefreshCharacterAnimator();}
+            }
+        }
+        private static async Task ObserveAppearanceRead(Task operation) {try {await operation;} catch(Exception) {}}
+
+        private void PlayQuestVideo(string url, Action completed, Action exited = null, Vector3? worldAnchor = null)
+        {
+            if (string.IsNullOrWhiteSpace(url) || url.Contains("ForBigger", StringComparison.OrdinalIgnoreCase))
+                url = openingVideoUrl;
+            videoVisible = true;
+            AudioManager.Instance?.SetMusicDucked(true);
+            playerController.SetInputEnabled(false);
+            UnlockCursor();
+            if (questVideo == null)
+            {
+                var host = new GameObject("Quest Video Overlay");
+                host.transform.SetParent(transform, false);
+                questVideo = host.AddComponent<UrlVideoSequencePlayer>();
+            }
+            if (worldAnchor.HasValue)
+            {
+                questVideo.WorldAnchor = worldAnchor;
+                playerController.FocusProjection(worldAnchor);
+            }
+            else if (activeStation != null)
+            {
+                var camera = Camera.main;
+                var towardPlayer = camera == null ? Vector3.forward
+                    : Vector3.ProjectOnPlane(camera.transform.position - activeStation.transform.position, Vector3.up).normalized;
+                questVideo.WorldAnchor = activeStation.transform.position + Vector3.up * 1.3f + towardPlayer * 0.85f;
+            }
+            else
+            {
+                questVideo.WorldAnchor = null;
+            }
+            questVideo.AssignedQuestAction = arenaOnly ? () => WorkshopAssignmentLauncher.Launch(message => OpenArenaPanel("WORKSHOP", message)) : (Action)null;
+            Debug.Log("[Quest Video] Opening configured URL: " + url);
+            questVideo.Play(url, () =>
+            {
+                videoVisible = false;
+                AudioManager.Instance?.SetMusicDucked(false);
+                playerController.FocusProjection(null);
+                playerController.SetInputEnabled(false);
+                UnlockCursor();
+                completed?.Invoke();
+            }, () =>
+            {
+                videoVisible = false;
+                AudioManager.Instance?.SetMusicDucked(false);
+                playerController.FocusProjection(null);
+                UnlockCursor();
+                if (exited != null) exited(); else completed?.Invoke();
+            });
+        }
+
+        private void Update()
+        {
+            if (arrivingOnShip) return;
+            if (personalStatus != null && personalStatus.IsOpen)
+            {
+                if (Keyboard.current != null && Keyboard.current.escapeKey.wasPressedThisFrame) personalStatus.CloseRecap();
+                return;
+            }
+            if (questChartMarker != null)
+                questChartMarker.SetActive(!videoVisible && !journalVisible && !pauseVisible && !briefingVisible);
+            if (videoVisible || Keyboard.current == null)
+                return;
+
+            if (Keyboard.current.escapeKey.wasPressedThisFrame)
+            {
+                if (lessonVisible)
+                {
+                    CloseLesson();
+                    return;
+                }
+
+                if (journalVisible)
+                {
+                    CloseJournal();
+                    return;
+                }
+
+                if (!briefingVisible && (completionPanel == null || !completionPanel.activeSelf))
+                    TogglePause();
+            }
+
+            if (!briefingVisible && !lessonVisible && !journalVisible && !pauseVisible && !questComplete &&
+                Keyboard.current.jKey.wasPressedThisFrame)
+                OpenJournal();
+        }
+
+        private void EnsurePersistence()
+        {
+            if (FindFirstObjectByType<QuestProgressRepository>() == null)
+                new GameObject("Quest Progress Repository").AddComponent<QuestProgressRepository>();
+        }
+
+        private void ValidateContentDefinition()
+        {
+            if (questDefinition == null)
+            {
+                Debug.LogWarning("[CelestialClockQuest] No QuestDefinition assigned. The scene will use its built-in launch content.");
+                return;
+            }
+
+            if (questDefinition.CountRequiredChallenges() != 4)
+            {
+                Debug.LogWarning("[CelestialClockQuest] The authored definition should contain four required challenge nodes.");
+            }
+        }
+
+        private void ConfigureAtmosphere()
+        {
+            previousPipeline = QualitySettings.renderPipeline;
+            if (arenaPipeline != null)
+                QualitySettings.renderPipeline = arenaPipeline;
+            RenderSettings.ambientMode = UnityEngine.Rendering.AmbientMode.Flat;
+            RenderSettings.ambientLight = new Color(.30f, .25f, .22f);
+            RenderSettings.fog = true;
+            RenderSettings.fogMode = FogMode.Exponential;
+            RenderSettings.fogColor = ArenaHaze;
+            RenderSettings.fogDensity = .009f;
+        }
+
+        private void BuildWorld()
+        {
+            CreateMoonlight();
+            CreateOcean();
+            CreateStarfield();
+            CreateShipAndDeck();
+            CreateLivingHorizon();
+            CreatePlayer();
+            CreateCaptain();
+            if (arenaOnly) CreateCrew();
+            if (!arenaOnly)
+                CreateQuestStations();
+        }
+
+        private void CreateMoonlight()
+        {
+            var moonLightObject = new GameObject("Moonlight");
+            var moonLight = moonLightObject.AddComponent<Light>();
+            moonLight.type = LightType.Directional;
+            moonLight.color = new Color(0.55f, 0.7f, 1f);
+            moonLight.intensity = .45f;
+            moonLight.shadows = LightShadows.Soft;
+            moonLightObject.transform.rotation = Quaternion.Euler(48f, -32f, 0f);
+
+            var moon = CreatePrimitive("Celestial Moon", PrimitiveType.Sphere, new Vector3(-18f, 22f, 37f),
+                new Vector3(5f, 5f, 5f), CreateMaterial(new Color(0.76f, 0.88f, 1f), true));
+            moon.AddComponent<CelestialPulse>().Configure(0.09f, 0.4f);
+            var moonGlow = new GameObject("Moon Glow");
+            moonGlow.transform.position = moon.transform.position;
+            var glow = moonGlow.AddComponent<Light>();
+            glow.type = LightType.Point;
+            glow.range = 42f;
+            glow.intensity = .65f;
+            glow.color = new Color(0.28f, 0.48f, 1f);
+        }
+
+        private void CreateOcean()
+        {
+            var oceanMaterial = arenaWater != null ? arenaWater : CreateMaterial(new Color(0.015f, 0.11f, 0.28f));
+            var ocean = CreatePrimitive("Astral Ocean", PrimitiveType.Plane, new Vector3(0f, 0.2f, 4f),
+                new Vector3(60f, 1f, 60f), oceanMaterial);
+
+            if (arenaWater != null)
+            {
+                var colors = new MaterialPropertyBlock();
+                colors.SetColor("_Color", new Color(.025f, .085f, .10f));
+                colors.SetVector("_HorizonTint", QualitySettings.activeColorSpace == ColorSpace.Linear ? ArenaHaze.linear : ArenaHaze);
+                colors.SetVector("_ReflectionTint", new Vector4(.035f, .06f, .085f, 1f));
+                colors.SetFloat("_HazeDensity", .009f);
+                ocean.GetComponent<Renderer>().SetPropertyBlock(colors);
+            }
+
+            if (arenaWater == null)
+                ocean.AddComponent<CelestialOceanMotion>().Configure(0.04f, 0.48f);
+        }
+
+        private void CreateStarfield()
+        {
+            var root = new GameObject("Constellation Field");
+            var starMaterial = CreateMaterial(new Color(0.72f, 0.9f, 1f), true);
+            var random = new System.Random(1207);
+            for (var i = 0; i < 68; i++)
+            {
+                var x = (float)(random.NextDouble() * 80d - 40d);
+                var y = (float)(random.NextDouble() * 29d + 5d);
+                var z = (float)(random.NextDouble() * 104d - 38d);
+                var scale = (float)(random.NextDouble() * 0.12d + 0.045d);
+                var star = CreatePrimitive("Star " + (i + 1), PrimitiveType.Sphere, new Vector3(x, y, z),
+                    Vector3.one * scale, starMaterial);
+                star.transform.SetParent(root.transform, true);
+            }
+
+            root.AddComponent<CelestialStarfieldDrift>().Configure(0.35f);
+        }
+
+        private void CreateShipAndDeck()
+        {
+            if (colonialShipPrefab != null)
+            {
+                var ship = Instantiate(colonialShipPrefab, Vector3.zero, Quaternion.identity);
+                shipRoot = ship.transform;
+                ship.name = "Aurora — Migrated Colonial Ship";
+                ship.transform.localScale = Vector3.one * shipScale;
+
+                // Collision follows the visible geometry and changes in deck height.
+                foreach (var collider in ship.GetComponentsInChildren<Collider>(true))
+                    collider.enabled = false;
+                AddDetailedShipColliders(ship);
+                foreach (var collider in ship.GetComponentsInChildren<MeshCollider>())
+                {
+                    var surfaceName = collider.name.ToLowerInvariant();
+                    if (surfaceName.Contains("floor") || surfaceName.Contains("stair") ||
+                        surfaceName.Contains("small_steps") || surfaceName.Contains("wheel_area") || surfaceName.Contains("ship_body"))
+                        deckSurfaces.Add(collider);
+                }
+                foreach (var part in ship.GetComponentsInChildren<Transform>())
+                    if (part.name.StartsWith("Sail_", StringComparison.OrdinalIgnoreCase))
+                        part.gameObject.AddComponent<AuroraSailWind>();
+            }
+            else
+            {
+                CreateFallbackShip();
+            }
+
+            CreateDeckBounds();
+            CreateDeckDressing();
+        }
+
+        private static void AddDetailedShipColliders(GameObject ship)
+        {
+            // Static collision follows the solid surfaces. Rigging stays non-blocking.
+            var collisionNames = new[]
+            {
+                "mast", "cannon", "barrel", "boxes", "treasure", "hatch", "door",
+                "wheel", "stair", "sandbag", "rail", "basket", "floor", "ship_body", "small_steps"
+            };
+
+            foreach (var filter in ship.GetComponentsInChildren<MeshFilter>(true))
+            {
+                if (filter.sharedMesh == null)
+                    continue;
+
+                var objectName = filter.gameObject.name.ToLowerInvariant();
+                var shouldCollide = false;
+                for (var index = 0; index < collisionNames.Length; index++)
+                {
+                    if (!objectName.Contains(collisionNames[index]))
+                        continue;
+                    shouldCollide = true;
+                    break;
+                }
+
+                if (!shouldCollide)
+                    continue;
+
+                var meshCollider = filter.GetComponent<MeshCollider>();
+                if (meshCollider == null)
+                    meshCollider = filter.gameObject.AddComponent<MeshCollider>();
+                meshCollider.sharedMesh = filter.sharedMesh;
+                meshCollider.convex = false;
+                meshCollider.enabled = true;
+            }
+        }
+
+        private void CreateFallbackShip()
+        {
+            var fallbackDeck = CreatePrimitive("Aurora Deck Placeholder", PrimitiveType.Cube, new Vector3(0f, 0.72f, 2f),
+                new Vector3(6f, 0.55f, 20f), CreateMaterial(new Color(0.19f, 0.07f, 0.025f)));
+            fallbackDeck.GetComponent<Collider>().enabled = true;
+            deckSurfaces.Add(fallbackDeck.GetComponent<Collider>());
+            var mast = CreatePrimitive("Aurora Mast", PrimitiveType.Cylinder, new Vector3(0f, 6f, 2f),
+                new Vector3(0.42f, 5.4f, 0.42f), CreateMaterial(new Color(0.13f, 0.045f, 0.015f)));
+            mast.transform.localScale = new Vector3(0.42f, 5.4f, 0.42f);
+        }
+
+        private void CreateDeckBounds()
+        {
+            // Each ship version has a visible solid deck. An invisible floor across
+            // the ship would float above the lower parts of that deck.
+            CreateBarrier("Port Safety Rail", new Vector3(-3.08f, 2.85f, 1.9f), new Vector3(0.22f, 2.2f, 20.8f));
+            CreateBarrier("Starboard Safety Rail", new Vector3(3.08f, 2.85f, 1.9f), new Vector3(0.22f, 2.2f, 20.8f));
+            CreateBarrier("Stern Safety Rail", new Vector3(0f, 2.85f, -8.45f), new Vector3(6.15f, 2.2f, 0.22f));
+            CreateBarrier("Bow Safety Rail", new Vector3(0f, 2.85f, 12.3f), new Vector3(6.15f, 2.2f, 0.22f));
+        }
+
+        private void CreateDeckDressing()
+        {
+            if (treasureChestPrefab != null)
+            {
+                var chestPosition = DeckPosition(0f, 11.1f);
+                var chest = Instantiate(treasureChestPrefab, chestPosition, Quaternion.Euler(0f, 180f, 0f));
+                chest.name = "Captain's Reward Chest";
+                chest.transform.localScale = Vector3.one * shipScale;
+                foreach (var collider in chest.GetComponentsInChildren<Collider>(true))
+                    collider.enabled = false;
+                var renderers = chest.GetComponentsInChildren<Renderer>();
+                var bottom = float.PositiveInfinity;
+                foreach (var renderer in renderers)
+                    bottom = Mathf.Min(bottom, renderer.bounds.min.y);
+                if (!float.IsInfinity(bottom))
+                    chest.transform.position += Vector3.up * (chestPosition.y - bottom);
+                AddDetailedShipColliders(chest);
+                AddShipInteraction(chest, QuestArenaShipAction.TreasureChest, "OPEN THE REWARD CHEST");
+            }
+
+            CreateLantern(DeckPosition(-2.5f, -5.7f));
+            CreateLantern(DeckPosition(2.5f, -1.1f));
+            CreateLantern(DeckPosition(-2.5f, 3.2f));
+            CreateLantern(DeckPosition(2.5f, 7.8f));
+        }
+
+        private void CreateLantern(Vector3 position)
+        {
+            var post = CreatePrimitive("Aurora Lantern Post", PrimitiveType.Cylinder, position + Vector3.up * 0.62f,
+                new Vector3(0.09f, 0.62f, 0.09f), CreateMaterial(new Color(0.11f, 0.055f, 0.025f)));
+            var flamePosition = position + Vector3.up * 1.24f;
+            var iron = CreateMaterial(new Color(.095f, .085f, .075f));
+            var frame = CreatePrimitive("Iron lantern base", PrimitiveType.Cylinder,
+                flamePosition + Vector3.down * .13f, new Vector3(.29f, .033f, .29f), iron);
+            frame.transform.SetParent(post.transform, true);
+            var cap = CreatePrimitive("Iron lantern cap", PrimitiveType.Cylinder,
+                flamePosition + Vector3.up * .15f, new Vector3(.29f, .035f, .29f), iron);
+            cap.transform.SetParent(frame.transform, true);
+            foreach (var corner in new[] { new Vector3(-1, 0, -1), new Vector3(-1, 0, 1),
+                new Vector3(1, 0, -1), new Vector3(1, 0, 1) })
+            {
+                var bar = CreatePrimitive("Iron lantern bar", PrimitiveType.Cube,
+                    flamePosition + corner * .088f, new Vector3(.028f, .26f, .028f), iron);
+                bar.transform.SetParent(frame.transform, true);
+            }
+            var lantern = CreatePrimitive("Aurora Lantern", PrimitiveType.Sphere,
+                flamePosition,
+                new Vector3(.14f, .21f, .14f),
+                CreateMaterial(new Color(1f, .56f, .18f), true));
+            lantern.AddComponent<CelestialPulse>().Configure(0.12f, 1.8f);
+            var lightObject = new GameObject("Lantern Light");
+            lightObject.transform.position = lantern.transform.position;
+            var light = lightObject.AddComponent<Light>();
+            light.type = LightType.Point;
+            light.range = 7f;
+            light.intensity = 5f;
+            light.color = new Color(1f, 0.55f, 0.22f);
+            lightObject.AddComponent<AuroraLanternFlicker>();
+        }
+
+        private static void CreateBarrier(string name, Vector3 center, Vector3 size)
+        {
+            var barrier = new GameObject(name);
+            var collider = barrier.AddComponent<BoxCollider>();
+            collider.center = center;
+            collider.size = size;
+        }
+
+        private void CreatePlayer()
+        {
+            var player = new GameObject("Student Navigator");
+            player.tag = "Player";
+            player.transform.position = DeckPosition(0.45f, -5.8f);
+            if (arenaOnly && ArenaDeckPlacement.TryClearArea(deckSurfaces,
+                    new[] { new Vector2(.45f, -2.55f), new Vector2(0f, -2.1f), new Vector2(.4f, -.75f) },
+                    new Vector2(.5f, .5f), out var middleDeck))
+                player.transform.position = middleDeck;
+
+            var controller = player.AddComponent<CharacterController>();
+            controller.height = 1.08f;
+            controller.radius = 0.18f;
+            controller.center = new Vector3(0f, 0.54f, 0f);
+            controller.stepOffset = 0.16f;
+            controller.skinWidth = 0.015f;
+            controller.slopeLimit = 48f;
+
+            CreateSelectedPlayerVisual(player.transform);
+
+            var cameraPivot = new GameObject("Third Person Camera Pivot");
+            cameraPivot.transform.SetParent(player.transform, false);
+            cameraPivot.transform.localPosition = new Vector3(0f, 0.80f, 0f);
+
+            var cameraObject = new GameObject("Navigator Camera");
+            cameraObject.tag = "MainCamera";
+            cameraObject.transform.SetParent(cameraPivot.transform, false);
+            cameraObject.transform.localPosition = new Vector3(0f, 0f, -1.25f);
+            var camera = cameraObject.AddComponent<Camera>();
+            camera.clearFlags = CameraClearFlags.SolidColor;
+            camera.backgroundColor = ArenaHaze;
+            camera.nearClipPlane = 0.05f;
+            camera.farClipPlane = 125f;
+            cameraObject.AddComponent<AudioListener>();
+
+            playerController = player.AddComponent<CelestialClockPlayerController>();
+            playerController.Configure(this, moveSpeed, lookSensitivity);
+            playerController.SetInputEnabled(false);
+        }
+
+        private void CreateSelectedPlayerVisual(Transform playerRoot,StudentAppearance? selectedAppearance=null)
+        {
+            if(ImagineQuest.Characters.StudentCharacterCatalog.Load()!=null)
+            {
+                playerAvatar=ImagineQuest.Characters.StudentCharacterAvatar.Create(playerRoot,
+                    selectedAppearance??ImagineQuest.Characters.StudentAppearance.FromAvatarId(StudentAvatarIdentity.AvatarId),.58f);
+                playerAvatar.name="Selected Pirate Avatar";
+                AlignVisualFeetToPlayerRoot(playerAvatar.gameObject,playerRoot);
+                playerAvatar.gameObject.AddComponent<PirateVisualGrounding>().Configure(playerRoot,playerRoot.GetComponent<CharacterController>());
+                SetPlayerAppearanceVisible(!appearanceLoading);
+                return;
+            }
+            GameObject prefab = null;
+            if (piratePlayerPrefabs != null && piratePlayerPrefabs.Length > 0)
+                prefab = piratePlayerPrefabs[piratePlayerPrefabs.Length - 1];
+            if (prefab == null)
+                prefab = pirateCaptainPrefab;
+
+            if (prefab == null)
+            {
+                var fallback = CreatePrimitive("Student Pirate", PrimitiveType.Capsule,
+                    playerRoot.position + Vector3.up * 0.9f, new Vector3(0.65f, 0.9f, 0.65f),
+                    CreateMaterial(new Color(0.12f, 0.42f, 0.72f)));
+                fallback.transform.SetParent(playerRoot, true);
+                Destroy(fallback.GetComponent<Collider>());
+                return;
+            }
+
+            var visual = Instantiate(prefab, playerRoot);
+            visual.name = "Selected Pirate Avatar";
+            visual.transform.localPosition = Vector3.zero;
+            visual.transform.localRotation = Quaternion.identity;
+            visual.transform.localScale = Vector3.one * 0.52f;
+            ConfigurePirateAnimator(visual);
+            foreach (var collider in visual.GetComponentsInChildren<Collider>(true))
+                collider.enabled = false;
+
+            playerStyler = visual.AddComponent<PirateAvatarStyler>();
+            playerStyler.Apply(StudentAvatarIdentity.AvatarId, StudentAvatarIdentity.ColorHex);
+            AlignVisualFeetToPlayerRoot(visual, playerRoot);
+            visual.AddComponent<PirateVisualGrounding>().Configure(playerRoot, playerRoot.GetComponent<CharacterController>());
+        }
+
+        private void ApplyStudentAppearance()
+        {
+            if(playerAvatar==null) {if(playerStyler!=null) playerStyler.Apply(StudentAvatarIdentity.AvatarId,StudentAvatarIdentity.ColorHex);return;}
+            var next=ImagineQuest.Characters.StudentAppearance.FromAvatarId(StudentAvatarIdentity.AvatarId);
+            ApplyAppearance(next);
+        }
+        private void SetPlayerAppearanceVisible(bool visible)
+        {
+            if(playerAvatar==null) return;
+            foreach(var renderer in playerAvatar.GetComponentsInChildren<Renderer>(true)) renderer.forceRenderingOff=!visible;
+        }
+        private void ApplyAppearance(StudentAppearance next)
+        {
+            if(playerAvatar==null) return;
+            if(playerAvatar.Body==next.Body) {playerAvatar.Apply(next);return;}
+            var root=playerAvatar.transform.parent;
+            playerAvatar.gameObject.SetActive(false);Destroy(playerAvatar.gameObject);
+            CreateSelectedPlayerVisual(root,next);playerController?.RefreshCharacterAnimator();
+        }
+
+        internal static void AlignVisualFeetToPlayerRoot(GameObject visual, Transform playerRoot)
+        {
+            // Imported bounds cover all animation poses and inactive outfits. Use
+            // the evaluated vertices of active meshes to locate the actual feet.
+            var animator = visual.GetComponentInChildren<Animator>();
+            if (animator != null && animator.runtimeAnimatorController != null)
+            {
+                animator.Play(0, 0, 0f);
+                animator.Update(0f);
+            }
+            var lowestVertex = float.PositiveInfinity;
+            var sample = new Mesh();
+            foreach (var renderer in visual.GetComponentsInChildren<SkinnedMeshRenderer>())
+            {
+                if (!renderer.enabled || !renderer.gameObject.activeInHierarchy || renderer.sharedMesh == null)
+                    continue;
+                // Compensate the renderer scale; TransformPoint applies that scale
+                // once when converting the baked vertices to world space.
+                renderer.BakeMesh(sample, true);
+                foreach (var vertex in sample.vertices)
+                {
+                    var height = renderer.transform.TransformPoint(vertex).y;
+                    lowestVertex = Mathf.Min(lowestVertex, height);
+                }
+                sample.Clear();
+            }
+            if (Application.isPlaying) Destroy(sample); else DestroyImmediate(sample);
+            if (!float.IsInfinity(lowestVertex))
+            {
+                // This humanoid measures about one metre at scale 0.52, matching the
+                // scaled ship. Foot correction never resizes the character.
+                visual.transform.position += Vector3.up * (playerRoot.position.y - lowestVertex);
+            }
+        }
+
+        private void CreateCaptain()
+        {
+            // Leave the arena captain slot empty until a replacement skin is chosen.
+            // Ship fixtures and crew must still be created without a captain NPC.
+            if (arenaOnly)
+            {
+                CreateShipHubInteractions();
+                return;
+            }
+            var captainPosition = DeckPosition(-1.25f, -3.1f);
+            var helm = FindShipHelm();
+            if (helm != null)
+            {
+                var centre = new Vector2(helm.transform.position.x, helm.transform.position.z);
+                var candidates = new[]
+                {
+                    centre + new Vector2(1.5f, -0.6f), centre + new Vector2(-1.5f, -0.6f),
+                    centre + new Vector2(1f, -1f), centre + new Vector2(-1f, -1f),
+                    centre + new Vector2(1f, 0.3f), centre + new Vector2(-1f, 0.3f),
+                    centre + new Vector2(1.4f, 0.7f), centre + new Vector2(-1.4f, 0.7f),
+                    centre + new Vector2(1.6f, 1.1f), centre + new Vector2(-1.6f, 1.1f)
+                };
+                if (ArenaDeckPlacement.TryClearArea(deckSurfaces, candidates, new Vector2(0.6f, 0.6f), out var clear))
+                    captainPosition = clear;
+            }
+            GameObject captain;
+            var captainPrefab = pirateCaptainPrefab;
+            if (captainPrefab != null)
+            {
+                captain = Instantiate(captainPrefab, captainPosition, Quaternion.identity);
+                captain.name = "Captain Esme";
+                captain.transform.localScale = Vector3.one * 0.52f;
+                ConfigurePirateAnimator(captain);
+                captain.AddComponent<PirateAvatarStyler>().Apply("hero");
+                AlignVisualFeetToPlayerRoot(captain, captain.transform);
+                foreach (var collider in captain.GetComponentsInChildren<Collider>(true))
+                    collider.enabled = false;
+                var body = captain.AddComponent<CapsuleCollider>();
+                var visualScale = captain.transform.lossyScale.y;
+                body.height = 1f / visualScale;
+                body.radius = 0.18f / visualScale;
+                body.center = Vector3.up * ((captainPosition.y + 0.5f - captain.transform.position.y) / visualScale);
+            }
+            else
+            {
+                captain = CreatePrimitive("Captain Esme", PrimitiveType.Capsule, captainPosition + Vector3.up,
+                    new Vector3(0.8f, 1.1f, 0.8f), CreateMaterial(new Color(0.42f, 0.08f, 0.09f)));
+                captain.AddComponent<CelestialPulse>().Configure(0.05f, 1f);
+                Destroy(captain.GetComponent<Collider>());
+            }
+
+            AddShipInteraction(captain, QuestArenaShipAction.Captain, "TALK TO CAPTAIN ESME");
+            CreateShipHubInteractions();
+        }
+
+        private void ConfigurePirateAnimator(GameObject pirate)
+        {
+            var animator = pirate.GetComponentInChildren<Animator>();
+            if (animator == null || pirateLocomotionController == null || pirateHumanoidAvatar == null)
+                return;
+            if (animator.avatar == null || !animator.avatar.isValid || !animator.avatar.isHuman)
+                animator.avatar = pirateHumanoidAvatar;
+            animator.runtimeAnimatorController = pirateLocomotionController;
+            animator.applyRootMotion = false;
+            animator.cullingMode = AnimatorCullingMode.AlwaysAnimate;
+            animator.Rebind();
+            animator.SetFloat("Speed", 0f);
+            animator.SetBool("isGrounded", true);
+            animator.Update(0f);
+            animator.speed = 1f;
+        }
+
+        private Vector3 DeckPosition(float x, float z)
+        {
+            Physics.SyncTransforms();
+            var ray = new Ray(new Vector3(x, 15f, z), Vector3.down);
+            var highest = float.NegativeInfinity;
+            foreach (var surface in deckSurfaces)
+                if (surface.enabled && surface.Raycast(ray, out var hit, 25f) && hit.normal.y > 0.6f)
+                    highest = Mathf.Max(highest, hit.point.y);
+            return new Vector3(x, float.IsNegativeInfinity(highest) ? 1.73f : highest + 0.015f, z);
+        }
+
+        private void CreateLivingHorizon()
+        {
+            var rockMaterial = CreateMaterial(new Color(0.07f, 0.105f, 0.15f));
+            for (var index = 0; index < 9; index++)
+            {
+                var angle = index * 0.62f;
+                var distance = 60f + index % 3 * 9f;
+                var rock = CreatePrimitive("Distant sea rock", PrimitiveType.Sphere,
+                    new Vector3(Mathf.Sin(angle) * distance, 0.05f, Mathf.Cos(angle) * distance),
+                    new Vector3(7f + index % 3 * 2f, 2.5f + index % 4, 5f), rockMaterial);
+                rock.transform.rotation = Quaternion.Euler(0f, index * 41f, 0f);
+            }
+            var gullMaterial = CreateMaterial(new Color(0.58f, 0.62f, 0.69f));
+            for (var index = 0; index < 5; index++)
+            {
+                var gull = new GameObject("Circling sea gull " + (index + 1));
+                var left = CreatePrimitive("Left wing", PrimitiveType.Cube, Vector3.zero,
+                    new Vector3(0.22f, 0.018f, 0.09f), gullMaterial);
+                var right = CreatePrimitive("Right wing", PrimitiveType.Cube, Vector3.zero,
+                    new Vector3(0.22f, 0.018f, 0.09f), gullMaterial);
+                left.transform.SetParent(gull.transform, false);
+                right.transform.SetParent(gull.transform, false);
+                left.transform.localPosition = new Vector3(-0.10f, 0f, 0f);
+                right.transform.localPosition = new Vector3(0.10f, 0f, 0f);
+                gull.AddComponent<AuroraGullFlight>().Configure(left.transform, right.transform, index * 1.1f);
+            }
+        }
+
+        private void CreateShipHubInteractions()
+        {
+            // Place the chart on the centreline between the masts.
+            var chartPosition = DeckPosition(0f, 1f);
+            var timber = CreateMaterial(new Color(0.66f, 0.56f, 0.43f));
+            if (shipRoot != null)
+                foreach (var renderer in shipRoot.GetComponentsInChildren<Renderer>())
+                    foreach (var source in renderer.sharedMaterials)
+                        if (source != null && source.name.Contains("Floor+Wheel"))
+                        {
+                            timber.mainTexture = source.HasProperty("_MainTex")
+                                ? source.GetTexture("_MainTex") : source.mainTexture;
+                            // Sample a wooden island, avoiding the unused white area in the ship atlas.
+                            timber.mainTextureScale = new Vector2(0.21f, 0.18f);
+                            timber.mainTextureOffset = new Vector2(0.025f, 0.025f);
+                        }
+            ClearChartApproach(chartPosition, timber);
+            var tableRoot = new GameObject("Quest Chart Furniture").transform;
+            tableRoot.position = chartPosition;
+            tableRoot.SetParent(transform, true);
+            GameObject ChartPart(string label, PrimitiveType type, Vector3 position, Vector3 size, Material material)
+            {
+                var part = CreatePrimitive(label, type, position, size, material);
+                part.transform.SetParent(tableRoot, true);
+                return part;
+            }
+            var chart = ChartPart("Quest Chart Table", PrimitiveType.Cube,
+                chartPosition + Vector3.up * 0.72f, new Vector3(1.4f, 0.08f, 0.9f), timber);
+            questChart = chart.transform;
+            // Individually laid boards leave narrow seams across the tabletop.
+            for (var board = 0; board < 6; board++)
+                ChartPart("Chart table plank", PrimitiveType.Cube,
+                    chartPosition + new Vector3(0f, 0.775f, -0.375f + board * 0.15f),
+                    new Vector3(1.44f, 0.035f, 0.146f), timber);
+            var iron = CreateMaterial(new Color(0.12f, 0.14f, 0.15f));
+            for (var index = 0; index < 4; index++)
+            {
+                var x = index % 2 == 0 ? -0.57f : 0.57f;
+                var z = index < 2 ? -0.32f : 0.32f;
+                var leg = ChartPart("Chart table leg", PrimitiveType.Cube,
+                    chartPosition + new Vector3(x, 0.35f, z), new Vector3(0.105f, 0.7f, 0.105f), timber);
+                leg.GetComponent<Collider>().enabled = true;
+                ChartPart("Iron leg strap", PrimitiveType.Cube,
+                    chartPosition + new Vector3(x, 0.59f, z), new Vector3(0.112f, 0.055f, 0.112f), iron);
+            }
+            for (var side = -1; side <= 1; side += 2)
+            {
+                ChartPart("Long table apron", PrimitiveType.Cube,
+                    chartPosition + new Vector3(0f, 0.635f, side * 0.34f), new Vector3(1.25f, 0.14f, 0.065f), timber);
+                ChartPart("End table apron", PrimitiveType.Cube,
+                    chartPosition + new Vector3(side * 0.59f, 0.635f, 0f), new Vector3(0.065f, 0.14f, 0.7f), timber);
+                ChartPart("Lower leg brace", PrimitiveType.Cube,
+                    chartPosition + new Vector3(side * 0.57f, 0.2f, 0f), new Vector3(0.07f, 0.07f, 0.68f), timber);
+            }
+            ChartPart("Table stretcher", PrimitiveType.Cube,
+                chartPosition + Vector3.up * 0.2f, new Vector3(1.2f, 0.07f, 0.07f), timber);
+            CreateTableChartDetails(chartPosition, tableRoot);
+            tableRoot.localScale = new Vector3(0.85f, 0.7f, 0.85f);
+            AddShipInteraction(chart, QuestArenaShipAction.ChartTable, "OPEN THE QUEST CHART");
+            CreateQuestChartMarker();
+            var helm = FindShipHelm();
+            if (helm == null)
+            {
+                helm = CreatePrimitive("Aurora Helm", PrimitiveType.Cylinder, DeckPosition(1.75f, -5.25f) + Vector3.up * 0.65f,
+                    new Vector3(0.55f, 0.04f, 0.55f), timber);
+                helm.transform.rotation = Quaternion.Euler(90f, 0f, 0f);
+            }
+            AddShipInteraction(helm, QuestArenaShipAction.Helm, "TAKE THE HELM");
+
+            var telescopePosition = DeckPosition(2.35f, 3.1f);
+            CreatePrimitive("Telescope stand", PrimitiveType.Cylinder, telescopePosition + Vector3.up * 0.33f,
+                new Vector3(0.045f, 0.33f, 0.045f), timber);
+            var telescope = CreatePrimitive("Captain's Telescope", PrimitiveType.Cylinder, telescopePosition + Vector3.up * 0.75f,
+                new Vector3(0.09f, 0.23f, 0.09f), CreateMaterial(new Color(0.62f, 0.38f, 0.08f)));
+            telescope.transform.rotation = Quaternion.Euler(68f, 0f, 0f);
+            AddShipInteraction(telescope, QuestArenaShipAction.Telescope, "LOOK THROUGH THE TELESCOPE");
+
+            var bellPosition = DeckPosition(-2.3f, 6.8f);
+            CreatePrimitive("Bell post", PrimitiveType.Cube, bellPosition + new Vector3(-0.16f, 0.56f, 0f),
+                new Vector3(0.07f, 1.12f, 0.07f), timber);
+            CreatePrimitive("Bell bracket", PrimitiveType.Cube, bellPosition + Vector3.up * 1.1f,
+                new Vector3(0.4f, 0.07f, 0.07f), timber);
+            var bell = CreatePrimitive("Ship Bell", PrimitiveType.Sphere, bellPosition + Vector3.up * 0.98f,
+                new Vector3(0.22f, 0.24f, 0.22f), CreateMaterial(new Color(0.9f, 0.55f, 0.12f), true));
+            AddShipInteraction(bell, QuestArenaShipAction.ShipBell, "RING THE SHIP'S BELL");
+        }
+
+        private void ClearChartApproach(Vector3 chartPosition, Material wood)
+        {
+            if (!arenaOnly || shipRoot == null) return;
+            var approach = new Bounds(chartPosition + new Vector3(0f, 0.4f, -1f), new Vector3(3f, 3f, 3.4f));
+            foreach (var renderer in shipRoot.GetComponentsInChildren<Renderer>())
+            {
+                var label = renderer.name.ToLowerInvariant();
+                var hatchEnclosure = label.Contains("hatch");
+                var looseProp = label.Contains("barrel") || label.Contains("boxes") || label.Contains("bottle") || label.Contains("lanterns");
+                if ((!hatchEnclosure && !looseProp) || !approach.Intersects(renderer.bounds)) continue;
+                var bounds = renderer.bounds;
+                renderer.gameObject.SetActive(false);
+                if (hatchEnclosure)
+                {
+                    // Preserve walkable collision while leaving the original deck planks visible.
+                    var cover = CreatePrimitive("Cleared chart approach deck", PrimitiveType.Cube,
+                        new Vector3(bounds.center.x, chartPosition.y - 0.055f, bounds.center.z),
+                        new Vector3(bounds.size.x, 0.08f, bounds.size.z), wood);
+                    cover.GetComponent<Renderer>().enabled = false;
+                    cover.GetComponent<Collider>().enabled = true;
+                    deckSurfaces.Add(cover.GetComponent<Collider>());
+                }
+            }
+            Physics.SyncTransforms();
+        }
+        private void CreateTableChartDetails(Vector3 origin, Transform tableRoot)
+        {
+            GameObject ChartPart(string label, PrimitiveType type, Vector3 position, Vector3 size, Material material)
+            {
+                var part = CreatePrimitive(label, type, position, size, material);
+                part.transform.SetParent(tableRoot, true);
+                return part;
+            }
+            var paper = CreateMaterial(new Color(0.78f, 0.68f, 0.46f));
+            var ink = CreateMaterial(new Color(0.22f, 0.26f, 0.23f));
+            var brass = CreateMaterial(new Color(0.65f, 0.44f, 0.16f));
+            ChartPart("Sea chart parchment", PrimitiveType.Cube,
+                origin + new Vector3(-0.04f, 0.8f, 0f), new Vector3(1.02f, 0.008f, 0.66f), paper);
+            for (var side = -1; side <= 1; side += 2)
+            {
+                var roll = ChartPart("Rolled parchment edge", PrimitiveType.Cylinder,
+                    origin + new Vector3(-0.04f, 0.812f, side * 0.325f), new Vector3(0.025f, 0.52f, 0.025f), paper);
+                roll.transform.rotation = Quaternion.Euler(0f, 0f, 90f);
+            }
+            // Coast outlines and a dotted sailing route make the parchment readable as a sea chart.
+            for (var island = 0; island < 3; island++)
+                for (var edge = 0; edge < 7; edge++)
+                {
+                    var angle = edge * Mathf.PI * 2f / 7f;
+                    var point = origin + new Vector3(-0.35f + island * 0.25f + Mathf.Cos(angle) * 0.08f,
+                        0.807f, -0.13f + island * 0.13f + Mathf.Sin(angle) * 0.055f);
+                    var coast = ChartPart("Chart coastline", PrimitiveType.Cube, point,
+                        new Vector3(0.06f, 0.002f, 0.006f), ink);
+                    coast.transform.rotation = Quaternion.Euler(0f, -angle * Mathf.Rad2Deg + 90f, 0f);
+                }
+            for (var dot = 0; dot < 12; dot++)
+                ChartPart("Chart sailing route", PrimitiveType.Sphere,
+                    origin + new Vector3(-0.32f + dot * 0.05f, 0.809f, 0.19f - dot * 0.025f),
+                    new Vector3(0.01f, 0.002f, 0.01f), ink);
+            for (var spoke = 0; spoke < 4; spoke++)
+            {
+                var line = ChartPart("Chart compass rose", PrimitiveType.Cube,
+                    origin + new Vector3(0.32f, 0.808f, -0.18f), new Vector3(0.12f, 0.002f, 0.004f), ink);
+                line.transform.rotation = Quaternion.Euler(0f, spoke * 45f, 0f);
+            }
+            ChartPart("Brass chart weight", PrimitiveType.Cylinder,
+                origin + new Vector3(-0.45f, 0.817f, -0.24f), new Vector3(0.045f, 0.013f, 0.045f), brass);
+            var compass = ChartPart("Navigator compass", PrimitiveType.Cylinder,
+                origin + new Vector3(0.61f, 0.815f, 0.19f), new Vector3(0.12f, 0.02f, 0.12f), brass);
+            ChartPart("Compass face", PrimitiveType.Cylinder,
+                compass.transform.position + Vector3.up * 0.022f, new Vector3(0.1f, 0.003f, 0.1f), paper);
+            var needle = ChartPart("Compass needle", PrimitiveType.Cube,
+                compass.transform.position + Vector3.up * 0.027f, new Vector3(0.065f, 0.002f, 0.008f), ink);
+            needle.transform.rotation = Quaternion.Euler(0f, 28f, 0f);
+        }
+        private void CreateQuestChartMarker()
+        {
+            questChartMarker = new GameObject("Quest Chart Marker", typeof(RectTransform), typeof(Canvas));
+            questChartMarker.transform.SetParent(transform, false);
+            questChartMarker.transform.position = questChart.position + Vector3.up * 0.72f;
+            questChartMarker.transform.localScale = Vector3.one * 0.002f;
+            questChartMarker.GetComponent<RectTransform>().sizeDelta = new Vector2(620f, 190f);
+            var canvas = questChartMarker.GetComponent<Canvas>();
+            canvas.renderMode = RenderMode.WorldSpace;
+            questChartMarker.AddComponent<CelestialBillboard>();
+            questChartMarker.AddComponent<CelestialOceanMotion>().Configure(0.025f, 1.8f);
+
+            var plate = CreatePanel("Chart Nameplate", questChartMarker.transform, Vector2.one * 0.5f,
+                new Vector2(600f, 125f), new Vector2(0f, 25f), new Color(0.035f, 0.045f, 0.055f, 0.94f), 12f);
+            plate.GetComponent<Image>().raycastTarget = false;
+            plate.GetComponent<Outline>().effectColor = new Color(0.89f, 0.72f, 0.32f, 0.9f);
+            var label = CreateText("Quest Chart Label", plate.transform, Vector2.zero, Vector2.one,
+                Vector2.zero, Vector2.zero, 58f, TextAlignmentOptions.Center, new Color(1f, 0.85f, 0.5f));
+            label.text = "QUEST CHART";
+            label.fontStyle = FontStyles.Bold;
+            var pointer = CreateText("Chart Pointer", questChartMarker.transform, Vector2.one * 0.5f,
+                Vector2.one * 0.5f, new Vector2(0f, -65f), new Vector2(90f, 70f), 60f,
+                TextAlignmentOptions.Center, new Color(1f, 0.85f, 0.5f));
+            pointer.text = "▼";
+        }
+
+        private GameObject FindShipHelm()
+        {
+            if (shipRoot != null)
+                foreach (var part in shipRoot.GetComponentsInChildren<Transform>())
+                    if (part.name == "Wheel") return part.gameObject;
+            return null;
+        }
+
+        private void AddShipInteraction(GameObject target, QuestArenaShipAction action, string prompt)
+        {
+            if (target == null)
+                return;
+            var solidCollider = target.GetComponent<Collider>();
+            if (solidCollider != null && action != QuestArenaShipAction.Captain)
+                solidCollider.enabled = true;
+            var interaction = target.AddComponent<QuestArenaShipInteractable>();
+            interaction.Configure(this, action, prompt);
+            var outline = target.AddComponent<QuestArenaOutline>();
+            outline.Configure(interactableOutline, action == QuestArenaShipAction.ChartTable || action == QuestArenaShipAction.Helm
+                ? new Color(1.1f, 0.78f, 0.25f) : new Color(0.25f, 0.85f, 0.9f));
+        }
+
+        private void CreateCrew()
+        {
+            if (piratePlayerPrefabs == null || piratePlayerPrefabs.Length == 0) return;
+            var names = new[] { "Luma — Navigator", "Rook — Boatswain", "Pip — Lookout", "Sage — Quartermaster" };
+            var styles = new[] { "mage", "bandit", "archer", "scholar" };
+            var spots = new[] { new Vector2(1f, -1.5f), new Vector2(-1f, -1.5f), new Vector2(-1.5f, 4.5f), new Vector2(0f, 7f) };
+            for (var index = 0; index < names.Length; index++)
+            {
+                var candidates = new[] { spots[index], spots[index] + new Vector2(0f, 1f), spots[index] + new Vector2(0f, -1f), spots[index] + new Vector2(-0.5f, 0f) };
+                Vector3 position;
+                if (index == 2)
+                {
+                    // Give Pip several visible deck positions rather than silently omitting him.
+                    var lookoutSpots = new[] { spots[index], new Vector2(-1.4f, 5f),
+                        new Vector2(1.5f, 4.5f), new Vector2(-1.5f, 2.8f), new Vector2(1.5f, 6f) };
+                    if (!ArenaDeckPlacement.TryClearArea(deckSurfaces, lookoutSpots, new Vector2(0.5f, 0.5f), out position))
+                        position = DeckPosition(-1.5f, 4.5f);
+                }
+                else if (!ArenaDeckPlacement.TryClearArea(deckSurfaces, candidates, new Vector2(0.5f, 0.5f), out position)) continue;
+                var crew = Instantiate(piratePlayerPrefabs[piratePlayerPrefabs.Length - 1], position,
+                    Quaternion.Euler(0f, index % 2 == 0 ? -65f : 65f, 0f));
+                crew.name = names[index]; crew.transform.localScale = Vector3.one * 0.52f;
+                foreach (var collider in crew.GetComponentsInChildren<Collider>(true)) collider.enabled = false;
+                ConfigurePirateAnimator(crew);
+                crew.AddComponent<PirateAvatarStyler>().Apply(styles[index]);
+                AlignVisualFeetToPlayerRoot(crew, crew.transform);
+                var body = crew.AddComponent<CapsuleCollider>();
+                body.height = 1f / 0.52f; body.radius = 0.18f / 0.52f;
+                body.center = Vector3.up * ((position.y + 0.5f - crew.transform.position.y) / 0.52f);
+                AddShipInteraction(crew, QuestArenaShipAction.Crew, "TALK TO " + names[index].Split('—')[0].Trim().ToUpperInvariant());
+                crew.AddComponent<AuroraCrewRoutine>().Configure(deckSurfaces, position, index);
+            }
+        }
+
+        private void CreateQuestStations()
+        {
+            if (TryCreateQuestStationsFromDefinition())
+                return;
+
+            // A self-contained fallback keeps the vertical slice playable if an artist
+            // opens the scene before its authored QuestDefinition has been assigned.
+            CreateBuiltInQuestStations();
+        }
+
+        private bool TryCreateQuestStationsFromDefinition()
+        {
+            if (questDefinition == null)
+                return false;
+
+            var layouts = new[]
+            {
+                new StationLayout("sail-fraction", "I.", new Vector3(-1.55f, 1.73f, -3.55f),
+                    new Color(0.16f, 0.72f, 0.86f), false),
+                new StationLayout("compass-angle", "II.", new Vector3(1.55f, 1.73f, 0.05f),
+                    new Color(0.48f, 0.52f, 1f), false),
+                new StationLayout("star-equation", "III.", new Vector3(-1.55f, 1.73f, 4.2f),
+                    new Color(0.78f, 0.42f, 0.9f), false),
+                new StationLayout("celestial-clock", "IV.", new Vector3(0f, 1.73f, 8.85f),
+                    new Color(1f, 0.7f, 0.2f), true)
+            };
+            var content = new DefinitionStationContent[layouts.Length];
+
+            // Validate every station before creating one. That prevents a partially
+            // authored asset from leaving duplicate fallback seals in the scene.
+            for (var index = 0; index < layouts.Length; index++)
+            {
+                if (!TryBuildDefinitionStationContent(layouts[index], out content[index]))
+                    return false;
+            }
+
+            for (var index = 0; index < content.Length; index++)
+            {
+                var station = content[index];
+                CreateStation(station.NodeId, station.DisplayTitle, station.TeachingNote, station.Question,
+                    station.Answers, station.CorrectIndex, station.Position, station.Accent, station.XpAward,
+                    station.InitiallyLocked);
+            }
+
+            return true;
+        }
+
+        private bool TryBuildDefinitionStationContent(StationLayout layout, out DefinitionStationContent content)
+        {
+            content = default;
+            var node = questDefinition.FindNode(layout.NodeId);
+            if (node == null || !node.RequiredForCompletion || node.Challenges == null)
+                return false;
+
+            QuestChallengeDefinition challenge = null;
+            for (var index = 0; index < node.Challenges.Count; index++)
+            {
+                var candidate = node.Challenges[index];
+                if (candidate != null && candidate.RequiredForCompletion &&
+                    candidate.ChallengeType == QuestChallengeType.MultipleChoice)
+                {
+                    challenge = candidate;
+                    break;
+                }
+            }
+
+            if (challenge == null || challenge.Answers == null || challenge.Answers.Count != 3 ||
+                string.IsNullOrWhiteSpace(challenge.Prompt))
+                return false;
+
+            var answers = new string[challenge.Answers.Count];
+            var correctIndex = -1;
+            for (var index = 0; index < challenge.Answers.Count; index++)
+            {
+                var answer = challenge.Answers[index];
+                if (answer == null || string.IsNullOrWhiteSpace(answer.AnswerId) || string.IsNullOrWhiteSpace(answer.Label))
+                    return false;
+
+                answers[index] = answer.Label;
+                if (challenge.IsCorrectAnswer(answer.AnswerId))
+                    correctIndex = index;
+            }
+
+            if (correctIndex < 0)
+                return false;
+
+            var teachingNote = string.IsNullOrWhiteSpace(node.NarrativeText)
+                ? challenge.HintText
+                : node.NarrativeText;
+            if (string.IsNullOrWhiteSpace(teachingNote))
+                return false;
+
+            var xpAward = questDefinition.RewardPolicy == null
+                ? 30
+                : questDefinition.RewardPolicy.ExperiencePerCorrectChallenge;
+            content = new DefinitionStationContent(layout.NodeId, layout.Ordinal + " " + node.Title.ToUpperInvariant(),
+                teachingNote, challenge.Prompt, answers, correctIndex, xpAward, layout.Position, layout.Accent,
+                layout.InitiallyLocked);
+            return true;
+        }
+
+        private void CreateBuiltInQuestStations()
+        {
+            CreateStation("sail-fraction", "I. THE SAILMAKER'S SEAL",
+                "A fraction names equal parts of a whole. The bottom number tells how many equal parts there are; the top number tells how many are chosen.",
+                "Three of four storm-sail panels must be raised. Which fraction names the raised panels?",
+                new[] { "1/4", "3/4", "4/3" }, 1, new Vector3(-1.55f, 1.73f, -3.55f),
+                new Color(0.16f, 0.72f, 0.86f), 28, false);
+
+            CreateStation("compass-angle", "II. THE COMPASS SEAL",
+                "A full turn is 360°. One quarter-turn is 90°, so it carries a ship from north to east when turning clockwise.",
+                "The compass points north. The Aurora makes one quarter-turn clockwise. Which direction is it facing?",
+                new[] { "West", "East", "South" }, 1, new Vector3(1.55f, 1.73f, 0.05f),
+                new Color(0.48f, 0.52f, 1f), 30, false);
+
+            CreateStation("star-equation", "III. THE STARLOCK SEAL",
+                "An equation is balanced like a ship's scale. Undo the operation beside the unknown to discover its value.",
+                "The starlock reads: x + 7 = 19. What value unlocks x?",
+                new[] { "10", "12", "26" }, 1, new Vector3(-1.55f, 1.73f, 4.2f),
+                new Color(0.78f, 0.42f, 0.9f), 32, false);
+
+            CreateStation("celestial-clock", "IV. WAKE THE CELESTIAL CLOCK",
+                "Clock angles use the same idea as turns. From 12 to 3 is one quarter of a full 360° turn, which is 90°.",
+                "The minute hand points to 12 and the hour hand points to 3. What angle lies between the hands?",
+                new[] { "45°", "90°", "180°" }, 1, new Vector3(0f, 1.73f, 8.85f),
+                new Color(1f, 0.7f, 0.2f), 40, true);
+        }
+
+        private void CreateStation(string nodeId, string title, string teachingNote, string question, string[] answers,
+            int correctIndex, Vector3 position, Color accent, int xpAward, bool initiallyLocked)
+        {
+            var root = new GameObject(title);
+            root.transform.position = position;
+            var trigger = root.AddComponent<SphereCollider>();
+            trigger.isTrigger = true;
+            trigger.radius = 1.48f;
+
+            var station = root.AddComponent<CelestialClockStation>();
+            station.Configure(this, nodeId, title, teachingNote, question, answers, correctIndex, xpAward, accent, initiallyLocked);
+            stations.Add(station);
+
+            var accentMaterial = CreateMaterial(accent, true);
+            var darkMaterial = CreateMaterial(Color.Lerp(accent, new Color(0.025f, 0.03f, 0.08f), 0.68f));
+            var pedestal = CreatePrimitive("Seal Pedestal", PrimitiveType.Cylinder, position + new Vector3(0f, 0.22f, 0f),
+                new Vector3(0.82f, 0.22f, 0.82f), darkMaterial);
+            var ring = CreatePrimitive("Seal Halo", PrimitiveType.Cylinder, position + new Vector3(0f, 0.48f, 0f),
+                new Vector3(0.64f, 0.06f, 0.64f), accentMaterial);
+            var crystal = CreatePrimitive("Seal Crystal", PrimitiveType.Sphere, position + new Vector3(0f, 1.05f, 0f),
+                new Vector3(0.33f, 0.48f, 0.33f), accentMaterial);
+            crystal.AddComponent<CelestialPulse>().Configure(0.2f, 1.6f);
+            station.RegisterVisual(pedestal.GetComponent<Renderer>());
+            station.RegisterVisual(ring.GetComponent<Renderer>());
+            station.RegisterVisual(crystal.GetComponent<Renderer>());
+            station.RegisterGlyph(crystal.transform);
+
+            var beacon = new GameObject("Seal Beacon");
+            beacon.transform.SetParent(root.transform, false);
+            beacon.transform.position = position + new Vector3(0f, 1.2f, 0f);
+            var pointLight = beacon.AddComponent<Light>();
+            pointLight.type = LightType.Point;
+            pointLight.range = 5.5f;
+            pointLight.intensity = 2.7f;
+            pointLight.color = accent;
+            station.RegisterBeacon(pointLight);
+
+            CreateStationLabel(root.transform, station, position + new Vector3(0f, 1.62f, 0f));
+            if (nodeId == "celestial-clock")
+                CreateClockFace(position, accentMaterial, station);
+
+            station.RefreshVisualState();
+        }
+
+        private static void CreateStationLabel(Transform parent, CelestialClockStation station, Vector3 position)
+        {
+            var labelObject = new GameObject("Seal Label");
+            labelObject.transform.SetParent(parent, true);
+            labelObject.transform.position = position;
+            labelObject.transform.localScale = Vector3.one * 0.075f;
+            var label = labelObject.AddComponent<TextMeshPro>();
+            label.font = TMP_Settings.defaultFontAsset;
+            label.fontSize = 3.8f;
+            label.alignment = TextAlignmentOptions.Center;
+            label.color = new Color(1f, 0.94f, 0.75f);
+            label.text = station.ShortLabel;
+            station.RegisterLabel(label);
+            labelObject.AddComponent<CelestialBillboard>();
+        }
+
+        private static void CreateClockFace(Vector3 position, Material accentMaterial, CelestialClockStation station)
+        {
+            var face = CreatePrimitive("Celestial Clock Face", PrimitiveType.Cylinder, position + new Vector3(0f, 2.35f, 0.15f),
+                new Vector3(1.28f, 0.09f, 1.28f), CreateMaterial(new Color(0.08f, 0.06f, 0.17f)));
+            face.transform.rotation = Quaternion.Euler(90f, 0f, 0f);
+            station.RegisterVisual(face.GetComponent<Renderer>());
+
+            for (var i = 0; i < 12; i++)
+            {
+                var angle = i * Mathf.PI * 2f / 12f;
+                var marker = CreatePrimitive("Clock Marker", PrimitiveType.Sphere,
+                    position + new Vector3(Mathf.Sin(angle) * 0.95f, 2.35f + Mathf.Cos(angle) * 0.95f, 0.03f),
+                    Vector3.one * 0.09f, accentMaterial);
+                station.RegisterVisual(marker.GetComponent<Renderer>());
+            }
+        }
+
+        private void BuildInterface()
+        {
+            EnsureUiEventSystem();
+
+            var canvasObject = new GameObject(arenaOnly ? "Quest Arena Interface" : "Celestial Clock Interface");
+            var canvas = canvasObject.AddComponent<Canvas>();
+            canvas.renderMode = RenderMode.ScreenSpaceOverlay;
+            canvas.sortingOrder = 20;
+            var scaler = canvasObject.AddComponent<CanvasScaler>();
+            scaler.uiScaleMode = CanvasScaler.ScaleMode.ScaleWithScreenSize;
+            scaler.referenceResolution = new Vector2(1920f, 1080f);
+            canvasObject.AddComponent<GraphicRaycaster>();
+
+            BuildHud(canvasObject.transform);
+            BuildJournalPanel(canvasObject.transform);
+            BuildPausePanel(canvasObject.transform);
+            if (arenaOnly)
+                BuildQuestPicker(canvasObject.transform);
+            else
+            {
+                BuildBriefing(canvasObject.transform);
+                BuildLessonPanel(canvasObject.transform);
+                BuildCompletionPanel(canvasObject.transform);
+            }
+            personalStatus = ImagineQuest.Student.StudentStatusView.Attach(canvasObject.transform, arenaOnly);
+        }
+
+        /// <summary>
+        /// The quest scene is intentionally self-contained. StudentHub's EventSystem is
+        /// destroyed during the scene transition, so this scene must make its own UI input
+        /// bridge for the briefing, teaching, journal, and completion buttons.
+        /// </summary>
+        private static void EnsureUiEventSystem()
+        {
+            if (FindFirstObjectByType<EventSystem>() != null)
+                return;
+
+            var eventSystemObject = new GameObject("EventSystem", typeof(EventSystem), typeof(InputSystemUIInputModule));
+            var inputModule = eventSystemObject.GetComponent<InputSystemUIInputModule>();
+            // Unity also assigns these defaults on OnEnable for runtime-created modules,
+            // but doing it explicitly keeps this portable across Input System versions.
+            inputModule.AssignDefaultActions();
+        }
+
+        private void BuildHud(Transform parent)
+        {
+            if (arenaOnly)
+            {
+                var heading = CreateArenaCard("Arena Heading", parent, Vector2.up, new Vector2(340f, 82f),
+                    new Vector2(194f, -65f));
+                heading.GetComponent<Image>().raycastTarget = false;
+                var arenaName = CreateText("Arena Name", heading.transform, Vector2.up, Vector2.up,
+                    new Vector2(20f, -11f), new Vector2(290f, 23f), 17f, TextAlignmentOptions.Left, ArenaGold);
+                arenaName.text = "THE AURORA";
+                var arenaTitle = CreateText("Arena Title", heading.transform, Vector2.up, Vector2.up,
+                    new Vector2(20f, -35f), new Vector2(290f, 33f), 29f, TextAlignmentOptions.Left, ArenaCream);
+                arenaTitle.text = "Quest Arena";
+                arenaTitle.fontStyle = FontStyles.Bold;
+                interactionText = CreateText("Interaction Prompt", parent, new Vector2(0.5f, 0f), new Vector2(0.5f, 0f),
+                    new Vector2(0f, 65f), new Vector2(820f, 42f), 23f, TextAlignmentOptions.Center, ArenaGold);
+                interactionText.gameObject.SetActive(false);
+                return;
+            }
+            var topStrip = CreateArenaCard("Top Story Strip", parent, new Vector2(0.5f, 1f), new Vector2(1640f, 108f),
+                new Vector2(0f, -78f));
+            var title = CreateText("Quest Title", topStrip.transform, new Vector2(0f, 1f), new Vector2(0f, 1f),
+                new Vector2(38f, -20f), new Vector2(940f, 38f), 29f, TextAlignmentOptions.Left, ArenaGold);
+            title.fontStyle = FontStyles.Bold;
+            title.text = QuestTitle;
+            var subtitle = CreateText("Quest Subtitle", topStrip.transform, new Vector2(0f, 0f), new Vector2(0f, 0f),
+                new Vector2(38f, 18f), new Vector2(970f, 28f), 17f, TextAlignmentOptions.Left, ArenaCream);
+            subtitle.text = "Aboard the Aurora  •  Read the note, solve the seal, chart the stars";
+
+            sealText = CreateText("Seal Counter", topStrip.transform, new Vector2(1f, 1f), new Vector2(1f, 1f),
+                new Vector2(-36f, -20f), new Vector2(310f, 34f), 23f, TextAlignmentOptions.Right, ArenaGold);
+            xpText = CreateText("Provisional XP", topStrip.transform, new Vector2(1f, 0f), new Vector2(1f, 0f),
+                new Vector2(-36f, 18f), new Vector2(310f, 28f), 17f, TextAlignmentOptions.Right, ArenaGold);
+
+            var objectiveCard = CreateArenaCard("Objective Card", parent, new Vector2(0f, 0f), new Vector2(545f, 132f),
+                new Vector2(34f, 34f));
+            var objectiveHeader = CreateText("Objective Header", objectiveCard.transform, new Vector2(0f, 1f), new Vector2(0f, 1f),
+                new Vector2(22f, -18f), new Vector2(500f, 24f), 15f, TextAlignmentOptions.Left, ArenaGold);
+            objectiveHeader.text = "CURRENT COURSE";
+            objectiveText = CreateText("Objective", objectiveCard.transform, new Vector2(0f, 0f), new Vector2(0f, 0f),
+                new Vector2(22f, 18f), new Vector2(500f, 68f), 21f, TextAlignmentOptions.Left, ArenaCream);
+            objectiveText.textWrappingMode = TextWrappingModes.Normal;
+
+            interactionText = CreateText("Interaction Prompt", parent, new Vector2(0.5f, 0f), new Vector2(0.5f, 0f),
+                new Vector2(0f, 92f), new Vector2(820f, 42f), 23f, TextAlignmentOptions.Center, ArenaGold);
+            interactionText.fontStyle = FontStyles.Bold;
+            interactionText.gameObject.SetActive(false);
+
+            var journalButton = CreateButton("Journal Button", parent, "J  JOURNAL", new Vector2(1f, 0f), new Vector2(1f, 0f),
+                new Vector2(-34f, 42f), new Vector2(230f, 50f), ArenaLeather);
+            journalButton.onClick.AddListener(OpenJournal);
+            var pauseButton = CreateButton("Pause Button", parent, "MENU", new Vector2(1f, 0f), new Vector2(1f, 0f),
+                new Vector2(-34f, 104f), new Vector2(230f, 42f), ArenaLeather);
+            pauseButton.onClick.AddListener(TogglePause);
+
+            UpdateHud();
+        }
+
+        private void BuildQuestPicker(Transform parent)
+        {
+            questPickerPanel = CreateFullOverlay("Quest Selection", parent, new Color(.035f, .025f, .02f, .68f));
+            var card = CreateArenaCard("Quest Chart", questPickerPanel.transform, new Vector2(.5f, .5f),
+                new Vector2(720f, 470f), Vector2.zero);
+            var top = new Vector2(.5f, 1f);
+            var title = CreateText("Quest Picker Title", card.transform, top, top,
+                new Vector2(0f, -30f), new Vector2(624f, 44f), 32f, TextAlignmentOptions.Center, ArenaCream);
+            title.text = "Choose a quest";
+            title.fontStyle = FontStyles.Bold;
+
+            var quay = CreatePanel("Cinder Quay", card.transform, top, new Vector2(624f, 180f),
+                new Vector2(0f, -182f), new Color(.15f, .106f, .073f), 0f);
+            var demoTitle = CreateText("Cinder Quay Title", quay.transform, top, top,
+                new Vector2(0f, -16f), new Vector2(560f, 32f), 25f, TextAlignmentOptions.Center, ArenaGold);
+            demoTitle.text = "CINDER QUAY";
+            var demoCopy = CreateText("Cinder Quay Description", quay.transform, top, top,
+                new Vector2(0f, -52f), new Vector2(560f, 30f), 20f, TextAlignmentOptions.Center, ArenaCream);
+            demoCopy.text = "Forge a blade. Explore the Tide Crypt.";
+            var demoPlay = CreateButton("Play Cinder Quay", quay.transform, "ENTER THE FORGE", top, top,
+                new Vector2(-144f, -106f), new Vector2(264f, 50f), new Color(.40f, .25f, .075f));
+            demoPlay.onClick.AddListener(BlacksmithRoomBootstrap.LaunchRaidPractice);
+            var preview = CreateButton("Watch chart preview", quay.transform, "WATCH PREVIEW", top, top,
+                new Vector2(144f, -106f), new Vector2(264f, 50f), ArenaLeather);
+            preview.onClick.AddListener(PlayDummyQuest);
+
+            var workshop = CreateButton("Play assigned workshop", card.transform, "THE AURORA'S REPAIR  /  ASSIGNED WORKSHOP",
+                top, top, new Vector2(0f, -294f), new Vector2(624f, 62f), ArenaLeather);
+            if (!ImagineQuest.Student.StudentCloudConfig.Enabled)
+                workshop.GetComponentInChildren<TMP_Text>().text = "THE AURORA'S REPAIR  /  LOCAL PRACTICE";
+            workshop.onClick.AddListener(() => {
+                CloseJournal();
+                WorkshopAssignmentLauncher.Launch(message => OpenArenaPanel("WORKSHOP", message));
+            });
+            var back = CreateButton("Close Quest Selection", card.transform, "RETURN TO SHIP",
+                new Vector2(0.5f, 0f), new Vector2(0.5f, 0f), new Vector2(0f, 30f),
+                new Vector2(280f, 46f), new Color(.15f, .106f, .073f));
+            back.onClick.AddListener(CloseJournal);
+            questPickerPanel.SetActive(false);
+        }
+
+        private void PlayDummyQuest()
+        {
+            if (videoVisible || questChart == null) return;
+            CloseJournal();
+            // Reuse the existing world-space projection, anchored to the actual chart.
+            PlayQuestVideo(string.IsNullOrWhiteSpace(dummyQuestVideoUrl) ? openingVideoUrl : dummyQuestVideoUrl,
+                EnableDeckInput, EnableDeckInput, questChart.position + Vector3.up * 1.1f);
+        }
+
+        private void OpenQuestPicker()
+        {
+            journalVisible = true;
+            questPickerPanel.SetActive(true);
+            interactionText.gameObject.SetActive(false);
+            playerController.SetInputEnabled(false);
+            UnlockCursor();
+        }
+
+        private void BuildBriefing(Transform parent)
+        {
+            briefingPanel = CreateFullOverlay("Briefing Overlay", parent, new Color(.035f, .025f, .02f, 0.88f));
+            var card = CreateArenaCard("Briefing Card", briefingPanel.transform, new Vector2(0.5f, 0.5f), new Vector2(1040f, 570f),
+                Vector2.zero);
+            var eyebrow = CreateText("Briefing Eyebrow", card.transform, new Vector2(0.5f, 1f), new Vector2(0.5f, 1f),
+                new Vector2(0f, -52f), new Vector2(860f, 34f), 18f, TextAlignmentOptions.Center, ArenaGold);
+            eyebrow.text = "QUEST BRIEFING  •  AURORA'S NIGHT WATCH";
+            briefingSpeakerText = CreateText("Speaker", card.transform, new Vector2(0.5f, 1f), new Vector2(0.5f, 1f),
+                new Vector2(0f, -112f), new Vector2(860f, 42f), 32f, TextAlignmentOptions.Center, ArenaGold);
+            briefingSpeakerText.fontStyle = FontStyles.Bold;
+            briefingBodyText = CreateText("Briefing Copy", card.transform, new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f),
+                new Vector2(0f, 12f), new Vector2(820f, 205f), 31f, TextAlignmentOptions.Center, ArenaCream);
+            briefingBodyText.textWrappingMode = TextWrappingModes.Normal;
+            briefingSpeakerText.text = "CAPTAIN ESME";
+            briefingBodyText.text = "The Celestial Clock has fallen silent. Prepare the Aurora for its next learning voyage.";
+            briefingStepText = CreateText("Briefing Step", card.transform, new Vector2(0.5f, 0f), new Vector2(0.5f, 0f),
+                new Vector2(0f, 132f), new Vector2(350f, 28f), 17f, TextAlignmentOptions.Center, ArenaGold);
+            briefingPrimaryButton = CreateButton("Briefing Primary", card.transform, "CONTINUE", new Vector2(0.5f, 0f), new Vector2(0.5f, 0f),
+                new Vector2(0f, 55f), new Vector2(400f, 58f), ArenaLeather);
+            briefingPrimaryButton.onClick.AddListener(AdvanceBriefing);
+            var skip = CreateButton("Skip Briefing", card.transform, "SKIP TO DECK", new Vector2(0.5f, 0f), new Vector2(0.5f, 0f),
+                new Vector2(0f, -17f), new Vector2(240f, 34f), ArenaLeather);
+            skip.onClick.AddListener(BeginExploration);
+        }
+
+        private void BuildLessonPanel(Transform parent)
+        {
+            lessonPanel = CreateFullOverlay("Lesson Overlay", parent, new Color(.035f, .025f, .02f, 0.76f));
+            var card = CreateArenaCard("Lesson Card", lessonPanel.transform, new Vector2(0.5f, 0.5f), new Vector2(1100f, 715f),
+                Vector2.zero);
+            lessonEyebrowText = CreateText("Lesson Eyebrow", card.transform, new Vector2(0.5f, 1f), new Vector2(0.5f, 1f),
+                new Vector2(0f, -39f), new Vector2(920f, 28f), 17f, TextAlignmentOptions.Center, ArenaGold);
+            lessonTitleText = CreateText("Lesson Title", card.transform, new Vector2(0.5f, 1f), new Vector2(0.5f, 1f),
+                new Vector2(0f, -87f), new Vector2(960f, 46f), 30f, TextAlignmentOptions.Center, ArenaGold);
+            lessonTitleText.fontStyle = FontStyles.Bold;
+            lessonBodyText = CreateText("Lesson Body", card.transform, new Vector2(0.5f, 1f), new Vector2(0.5f, 1f),
+                new Vector2(0f, -155f), new Vector2(890f, 175f), 25f, TextAlignmentOptions.Center, ArenaCream);
+            lessonBodyText.textWrappingMode = TextWrappingModes.Normal;
+            lessonFeedbackText = CreateText("Lesson Feedback", card.transform, new Vector2(0.5f, 1f), new Vector2(0.5f, 1f),
+                new Vector2(0f, -324f), new Vector2(880f, 42f), 20f, TextAlignmentOptions.Center, ArenaGold);
+            lessonFeedbackText.textWrappingMode = TextWrappingModes.Normal;
+
+            for (var i = 0; i < 3; i++)
+            {
+                var answer = CreateButton("Answer " + (i + 1), card.transform, "", new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f),
+                    new Vector2(0f, -58f - i * 70f), new Vector2(760f, 55f), ArenaLeather);
+                var capturedIndex = i;
+                answer.onClick.AddListener(() => AnswerSelected(capturedIndex));
+                answerButtons.Add(answer);
+            }
+
+            lessonPrimaryButton = CreateButton("Lesson Primary", card.transform, "START PRACTICE", new Vector2(0.5f, 0f), new Vector2(0.5f, 0f),
+                new Vector2(-215f, 42f), new Vector2(370f, 56f), ArenaLeather);
+            lessonSecondaryButton = CreateButton("Lesson Secondary", card.transform, "RETURN TO DECK", new Vector2(0.5f, 0f), new Vector2(0.5f, 0f),
+                new Vector2(215f, 42f), new Vector2(370f, 56f), ArenaLeather);
+            lessonPanel.SetActive(false);
+        }
+
+        private void BuildJournalPanel(Transform parent)
+        {
+            journalPanel = CreateFullOverlay("Navigator Journal", parent, new Color(.035f, .025f, .02f, 0.78f));
+            var card = CreateArenaCard("Journal Card", journalPanel.transform, new Vector2(0.5f, 0.5f), new Vector2(900f, 640f),
+                Vector2.zero);
+            journalTitleText = CreateText("Journal Title", card.transform, new Vector2(0.5f, 1f), new Vector2(0.5f, 1f),
+                new Vector2(0f, -48f), new Vector2(760f, 38f), 30f, TextAlignmentOptions.Center, ArenaGold);
+            journalTitleText.fontStyle = FontStyles.Bold;
+            journalTitleText.text = "NAVIGATOR'S JOURNAL";
+            journalText = CreateText("Journal Copy", card.transform, new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f),
+                new Vector2(0f, 0f), new Vector2(750f, 400f), 22f, TextAlignmentOptions.TopLeft, ArenaCream);
+            journalText.textWrappingMode = TextWrappingModes.Normal;
+            var close = CreateButton("Close Journal", card.transform, arenaOnly ? "RETURN TO SHIP" : "CLOSE JOURNAL", new Vector2(0.5f, 0f), new Vector2(0.5f, 0f),
+                new Vector2(0f, 42f), new Vector2(320f, 52f), ArenaLeather);
+            close.onClick.AddListener(CloseJournal);
+            close.GetComponent<RectTransform>().anchoredPosition = new Vector2(-180, 42);
+            var recap = CreateButton("Open personal recap", card.transform, "PERSONAL RECAP", new Vector2(.5f, 0), new Vector2(.5f, 0),
+                new Vector2(180, 42), new Vector2(320, 52), ArenaLeather);
+            recap.onClick.AddListener(() => personalStatus.OpenRecap());
+            journalPanel.SetActive(false);
+        }
+
+        private static GameObject CreateArenaCard(string name, Transform parent, Vector2 anchor, Vector2 size, Vector2 position)
+        {
+            var card = CreatePanel(name, parent, anchor, size, position, ArenaSoot, 0f);
+            var edge = CreatePanel("Brass trim", card.transform, new Vector2(.5f, 1f),
+                new Vector2(size.x, 3f), new Vector2(0f, -1.5f), ArenaBrass, 0f);
+            edge.GetComponent<Image>().raycastTarget = false;
+            return card;
+        }
+
+        private void BuildPausePanel(Transform parent)
+        {
+            pausePanel = CreateFullOverlay("Pause Overlay", parent, new Color(.035f, .025f, .02f, .38f));
+            var card = CreateArenaCard("Pause Card", pausePanel.transform, new Vector2(.5f, .5f),
+                new Vector2(620f, 390f), Vector2.zero);
+            var title = CreateText("Pause Title", card.transform, new Vector2(0.5f, 1f), new Vector2(0.5f, 1f),
+                new Vector2(0f, -72f), new Vector2(500f, 42f), 32f, TextAlignmentOptions.Center,
+                ArenaCream);
+            title.fontStyle = FontStyles.Bold;
+            title.text = arenaOnly ? "Take a breather" : "PAUSED";
+            var note = CreateText("Pause Note", card.transform, new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f),
+                new Vector2(0f, 10f), new Vector2(480f, 82f), 21f, TextAlignmentOptions.Center,
+                ArenaCream);
+            note.text = arenaOnly ? "Take a break, or return to your class. Choose a quest at the ship's chart table."
+                : "Take a break, or return to the ship to choose another quest.";
+            note.textWrappingMode = TextWrappingModes.Normal;
+            var resume = CreateButton("Resume", card.transform, "RETURN TO DECK", new Vector2(0.5f, 0f), new Vector2(0.5f, 0f),
+                new Vector2(0f, 98f), new Vector2(360f, 52f), ArenaLeather);
+            resume.onClick.AddListener(TogglePause);
+            var leave = CreateButton("Leave Quest", card.transform, arenaOnly ? "RETURN TO CLASS" : "RETURN TO SHIP", new Vector2(0.5f, 0f), new Vector2(0.5f, 0f),
+                new Vector2(0f, 32f), new Vector2(260f, 38f), ArenaLeather);
+            leave.onClick.AddListener(ReturnToStudentHub);
+            pausePanel.SetActive(false);
+        }
+
+        private void BuildCompletionPanel(Transform parent)
+        {
+            completionPanel = CreateFullOverlay("Quest Complete Overlay", parent, new Color(.035f, .025f, .02f, 0.82f));
+            var card = CreateArenaCard("Quest Complete Card", completionPanel.transform, new Vector2(0.5f, 0.5f), new Vector2(1000f, 590f),
+                Vector2.zero);
+            var title = CreateText("Completion Title", card.transform, new Vector2(0.5f, 1f), new Vector2(0.5f, 1f),
+                new Vector2(0f, -66f), new Vector2(880f, 46f), 35f, TextAlignmentOptions.Center, ArenaGold);
+            title.fontStyle = FontStyles.Bold;
+            title.text = "THE CLOCK IS SINGING AGAIN";
+            completionSummaryText = CreateText("Completion Summary", card.transform, new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f),
+                new Vector2(0f, 16f), new Vector2(820f, 220f), 25f, TextAlignmentOptions.Center, ArenaCream);
+            completionSummaryText.textWrappingMode = TextWrappingModes.Normal;
+            var hub = CreateButton("Completion Hub", card.transform, "RETURN TO SHIP", new Vector2(0.5f, 0f), new Vector2(0.5f, 0f),
+                new Vector2(0f, 82f), new Vector2(420f, 56f), ArenaLeather);
+            hub.onClick.AddListener(ReturnToStudentHub);
+            var explore = CreateButton("Completion Explore", card.transform, "EXPLORE THE DECK", new Vector2(0.5f, 0f), new Vector2(0.5f, 0f),
+                new Vector2(0f, 16f), new Vector2(280f, 36f), ArenaLeather);
+            explore.onClick.AddListener(CloseCompletionPanel);
+            completionPanel.SetActive(false);
+        }
+
+        private void ShowBriefing(int index)
+        {
+            briefingVisible = true;
+            briefingIndex = Mathf.Clamp(index, 0, briefingLines.Length - 1);
+            var line = briefingLines[briefingIndex];
+            briefingSpeakerText.text = string.IsNullOrWhiteSpace(line.Speaker) ? "CAPTAIN ESME" : line.Speaker;
+            briefingBodyText.text = string.IsNullOrWhiteSpace(line.Body)
+                ? "The Celestial Clock has fallen silent. Prepare the Aurora for its next learning voyage."
+                : line.Body;
+            briefingStepText.text = "BRIEFING " + (briefingIndex + 1) + " OF " + briefingLines.Length;
+            briefingPrimaryButton.GetComponentInChildren<TMP_Text>().text = briefingIndex == briefingLines.Length - 1
+                ? "SET SAIL"
+                : "CONTINUE";
+            briefingPanel.SetActive(true);
+            playerController.SetInputEnabled(false);
+            UnlockCursor();
+        }
+
+        private void AdvanceBriefing()
+        {
+            if (briefingIndex < briefingLines.Length - 1)
+            {
+                ShowBriefing(briefingIndex + 1);
+                return;
+            }
+
+            BeginExploration();
+        }
+
+        private void BeginExploration()
+        {
+            briefingVisible = false;
+            if (briefingPanel != null)
+                briefingPanel.SetActive(false);
+            EnableDeckInput();
+            UpdateHud();
+        }
+
+        public void HandleShipInteraction(QuestArenaShipAction action)
+        {
+            if (videoVisible || briefingVisible || lessonVisible || journalVisible || pauseVisible || questComplete)
+                return;
+
+            if (arenaOnly)
+            {
+                switch (action)
+                {
+                    case QuestArenaShipAction.ChartTable:
+                    case QuestArenaShipAction.Helm:
+                        OpenQuestPicker();
+                        break;
+                    case QuestArenaShipAction.Captain:
+                        OpenArenaPanel("CAPTAIN ESME", "Welcome aboard the Aurora! Explore the ship and visit the chart table to choose a quest.\n\nYour teacher's assignments will be available there.");
+                        break;
+                    case QuestArenaShipAction.TreasureChest:
+                        OpenArenaPanel("REWARD CHEST", "This is where your voyage rewards will be kept. Choose a quest at the chart table to begin.");
+                        break;
+                    case QuestArenaShipAction.Telescope:
+                        OpenArenaPanel("LOOKOUT", "The sea stretches beyond the Aurora. The chart table is where you choose your next quest.");
+                        break;
+                    case QuestArenaShipAction.ShipBell:
+                        OpenArenaPanel("SHIP'S BELL", "The bell calls the crew together. Ready for an adventure? Choose a quest at the chart table.");
+                        break;
+                    case QuestArenaShipAction.Crew:
+                        OpenArenaPanel("THE AURORA'S CREW", "Luma charts the stars, Rook keeps the deck shipshape, Pip watches the horizon, and Sage looks after supplies.\n\nLook for gold outlines to choose quests, and blue outlines to meet the crew and explore the ship.");
+                        break;
+                }
+                return;
+            }
+
+            switch (action)
+            {
+                case QuestArenaShipAction.Captain:
+                    ShowBriefing(0);
+                    break;
+                case QuestArenaShipAction.ChartTable:
+                    var session = QuestSession.Instance;
+                    var assignedTitle = session == null || string.IsNullOrWhiteSpace(session.QuestTitle)
+                        ? "The Riddle of the Celestial Clock"
+                        : session.QuestTitle;
+                    OpenArenaPanel("THE AURORA'S QUEST CHART",
+                        "<b>Assigned voyage</b>\n" + assignedTitle +
+                        "\n\n<color=#9CCFFF>Available aboard this ship:</color>\n" +
+                        "• Sailmaker's Seal — fractions\n• Compass Seal — angle turns\n" +
+                        "• Starlock Seal — equations\n• Celestial Clock — final challenge\n\n" +
+                        "Future voyages will appear on this chart when your teacher assigns them.");
+                    break;
+                case QuestArenaShipAction.TreasureChest:
+                    OpenArenaPanel("CAPTAIN'S REWARD CHEST",
+                        "Your restored seals and voyage rewards are kept here.\n\n" +
+                        "<b>Seals restored:</b> " + CompletedCount + " / " + stations.Count +
+                        "\n<b>Provisional XP:</b> " + provisionalXp +
+                        "\n\nComplete ship quests to fill the chest with new rewards.");
+                    break;
+                case QuestArenaShipAction.Helm:
+                    OpenArenaPanel("THE AURORA'S HELM",
+                        "The helm is ready, but the Celestial Clock must be restored before the Aurora can chart its next course.\n\n" +
+                        "Explore the deck and follow the glowing lesson fixtures.");
+                    break;
+                case QuestArenaShipAction.Telescope:
+                    OpenArenaPanel("CAPTAIN'S TELESCOPE",
+                        "Through the glass you can see distant lights waiting beyond the astral sea.\n\n" +
+                        "For now, your assigned voyage is here aboard the Aurora. Future quests will be revealed from this lookout.");
+                    break;
+                case QuestArenaShipAction.ShipBell:
+                    OpenArenaPanel("THE SHIP'S BELL",
+                        "The clear bell rings across the water. The Aurora's crew is ready for another learning voyage.");
+                    break;
+            }
+        }
+
+        private void OpenArenaPanel(string title, string body)
+        {
+            journalVisible = true;
+            journalTitleText.text = title;
+            journalText.text = body;
+            journalPanel.SetActive(true);
+            playerController.SetInputEnabled(false);
+            UnlockCursor();
+        }
+
+        public void OpenStation(CelestialClockStation station)
+        {
+            if (station == null || station.IsComplete || station.IsLocked || videoVisible || briefingVisible || lessonVisible || pauseVisible)
+                return;
+
+            activeStation = station;
+            lessonVisible = true;
+            lessonPanel.SetActive(true);
+            interactionText.gameObject.SetActive(false);
+            playerController.SetInputEnabled(false);
+            UnlockCursor();
+            lessonPanel.SetActive(false);
+            PlayQuestVideo(ResolveStationVideoUrl(activeStation), () =>
+            {
+                lessonPanel.SetActive(true);
+                ShowTeachingNote();
+            }, CloseLesson);
+        }
+
+        private string ResolveStationVideoUrl(CelestialClockStation station)
+        {
+            if (station == null)
+                return teachingVideoUrl;
+
+            switch (station.NodeId)
+            {
+                case "sail-fraction": return sailFractionVideoUrl;
+                case "compass-angle": return compassAngleVideoUrl;
+                case "star-equation": return starEquationVideoUrl;
+                case "celestial-clock": return celestialClockVideoUrl;
+                default: return teachingVideoUrl;
+            }
+        }
+
+        private void ShowTeachingNote()
+        {
+            if (activeStation == null)
+                return;
+
+            lessonEyebrowText.text = "TEACHING NOTE  •  READ BEFORE PRACTICE";
+            lessonTitleText.text = activeStation.Title;
+            lessonBodyText.text = activeStation.TeachingNote;
+            lessonFeedbackText.text = "When you are ready, use the practice prompt. You can return to this note any time.";
+            lessonFeedbackText.color = new Color(0.98f, 0.78f, 0.38f);
+            SetAnswersVisible(false);
+            ConfigureLessonButton(lessonPrimaryButton, "START PRACTICE", BeginPractice, ArenaLeather);
+            ConfigureLessonButton(lessonSecondaryButton, "RETURN TO DECK", CloseLesson, ArenaLeather);
+        }
+
+        private void BeginPractice()
+        {
+            if (activeStation == null)
+                return;
+
+            lessonEyebrowText.text = "PRACTICE PORTAL  •  TAKE YOUR TIME";
+            lessonTitleText.text = activeStation.Title;
+            lessonBodyText.text = activeStation.Question;
+            lessonFeedbackText.text = "Choose the answer that makes the seal glow. A retry is part of learning.";
+            lessonFeedbackText.color = new Color(0.72f, 0.87f, 1f);
+            SetAnswersVisible(true);
+            for (var i = 0; i < answerButtons.Count; i++)
+            {
+                answerButtons[i].GetComponentInChildren<TMP_Text>().text = activeStation.Answers[i];
+                answerButtons[i].interactable = true;
+            }
+            ConfigureLessonButton(lessonPrimaryButton, "READ TEACHING NOTE", ShowTeachingNote, ArenaLeather);
+            ConfigureLessonButton(lessonSecondaryButton, "RETURN TO DECK", CloseLesson, ArenaLeather);
+        }
+
+        private void AnswerSelected(int selectedIndex)
+        {
+            if (activeStation == null || selectedIndex < 0 || selectedIndex >= activeStation.Answers.Length)
+                return;
+
+            if (selectedIndex != activeStation.CorrectIndex)
+            {
+                lessonFeedbackText.text = "Not yet — reread the teaching note, then use the clue in the question and try again.";
+                lessonFeedbackText.color = new Color(1f, 0.7f, 0.34f);
+                return;
+            }
+
+            var completed = activeStation;
+            completed.MarkCompleted();
+            if (!completedNodeIds.Contains(completed.NodeId))
+                completedNodeIds.Add(completed.NodeId);
+            provisionalXp += completed.XpAward;
+            if (!ImagineQuest.Student.StudentCloudConfig.Enabled)
+                ImagineQuest.Student.StudentStatusService.GetOrCreate().RecordLocalReward(
+                    "celestial-clock/" + (QuestSession.Instance?.AssignmentId ?? "practice") + "/" + completed.NodeId,
+                    "Seal restored", completed.Title, completed.XpAward);
+            SaveRunSnapshot();
+
+            var justUnlockedFinale = CompletedCount == RequiredSealsBeforeFinale;
+            if (justUnlockedFinale)
+                UnlockFinalStation();
+
+            if (CompletedCount == stations.Count)
+            {
+                CloseLesson();
+                FinishQuest();
+                return;
+            }
+
+            lessonEyebrowText.text = "SEAL RESTORED";
+            lessonTitleText.text = completed.Title;
+            lessonBodyText.text = "Excellent navigation. The seal answers with starlight and the Aurora's clockwork hums a little louder.";
+            lessonFeedbackText.text = justUnlockedFinale
+                ? "The final clock seal is now awake at the bow. Follow its golden glow."
+                : "Your journal has been updated. Find the next glowing seal when you are ready.";
+            lessonFeedbackText.color = new Color(0.6f, 1f, 0.75f);
+            SetAnswersVisible(false);
+            ConfigureLessonButton(lessonPrimaryButton, "RETURN TO DECK", CloseLesson, ArenaLeather);
+            ConfigureLessonButton(lessonSecondaryButton, "OPEN JOURNAL", OpenJournalFromLesson, ArenaLeather);
+            UpdateHud();
+        }
+
+        private void UnlockFinalStation()
+        {
+            foreach (var station in stations)
+            {
+                if (station.NodeId != "celestial-clock")
+                    continue;
+                station.SetLocked(false);
+                break;
+            }
+        }
+
+        private void CloseLesson()
+        {
+            activeStation = null;
+            lessonVisible = false;
+            lessonPanel.SetActive(false);
+            if (!pauseVisible && !briefingVisible && !journalVisible && (completionPanel == null || !completionPanel.activeSelf))
+                EnableDeckInput();
+        }
+
+        private void OpenJournal()
+        {
+            if (briefingVisible || lessonVisible || pauseVisible || (completionPanel != null && completionPanel.activeSelf))
+                return;
+
+            if (arenaOnly)
+            {
+                OpenArenaPanel("SHIP GUIDE", "Hold Alt to reveal gold quest items and blue ship/crew interactions. Visit the chart table to play the dummy quest or see your teacher's selected quest.\n\nWASD — walk\nShift — sprint\nSpace — jump (release early for a short hop)\nMouse — orbit\nMouse wheel — zoom\nAlt — reveal interactions\nE — interact\nEsc — menu");
+                return;
+            }
+
+            journalVisible = true;
+            journalPanel.SetActive(true);
+            journalTitleText.text = "NAVIGATOR'S JOURNAL";
+            journalText.text = BuildJournalText();
+            playerController.SetInputEnabled(false);
+            UnlockCursor();
+        }
+
+        private void OpenJournalFromLesson()
+        {
+            // The completion card is still a lesson overlay, so close it before using
+            // the regular journal route. This keeps the button actionable and returns
+            // the learner to the deck after they review their notes.
+            CloseLesson();
+            OpenJournal();
+        }
+
+        private string BuildJournalText()
+        {
+            var text = "<b>Course notes</b>\n\n";
+            text += "<color=#9CCFFF>• Fractions:</color> top = chosen parts; bottom = equal parts in the whole.\n\n";
+            text += "<color=#9CCFFF>• Angle turns:</color> one quarter of 360° is 90°.\n\n";
+            text += "<color=#9CCFFF>• Equations:</color> undo the operation beside x to keep both sides balanced.\n\n";
+            text += "<b>Seal log</b>\n";
+            for (var i = 0; i < stations.Count; i++)
+            {
+                var station = stations[i];
+                var status = station.IsComplete ? "RESTORED" : station.IsLocked ? "SLEEPING" : "WAITING";
+                text += "• " + station.ShortLabel + " — <b>" + status + "</b>\n";
+            }
+            text += "\n<color=#B8D5F0>Controls: WASD move, Shift sprint, Space jump, mouse orbit, wheel zoom, E interact, J journal, Esc menu.</color>";
+            return text;
+        }
+
+        private void CloseJournal()
+        {
+            journalVisible = false;
+            journalPanel.SetActive(false);
+            if (questPickerPanel != null)
+                questPickerPanel.SetActive(false);
+            if (!pauseVisible && !lessonVisible && !briefingVisible && (completionPanel == null || !completionPanel.activeSelf))
+                EnableDeckInput();
+        }
+
+        private void TogglePause()
+        {
+            pauseVisible = !pauseVisible;
+            pausePanel.SetActive(pauseVisible);
+            if (pauseVisible)
+            {
+                playerController.SetInputEnabled(false);
+                UnlockCursor();
+            }
+            else
+            {
+                EnableDeckInput();
+            }
+        }
+
+        private void FinishQuest()
+        {
+            questComplete = true;
+            ApplyCompletionExperience();
+            SaveRunSnapshot();
+            UpdateHud();
+            completionSummaryText.text = "You restored all four seals and woke the Celestial Clock.\n\n" +
+                "Practice complete: " + CompletedCount + " seals  •  " + provisionalXp + " provisional XP recorded\n\n" +
+                "Your teacher can now see this completion after the Firebase classroom backend is deployed.";
+            PlayQuestVideo(completionVideoUrl, () => completionPanel.SetActive(true));
+            UnlockCursor();
+        }
+
+        private void ApplyCompletionExperience()
+        {
+            if (questDefinition == null || questDefinition.RewardPolicy == null ||
+                !questDefinition.RewardPolicy.Enabled || !questDefinition.RewardPolicy.ShowProvisionalExperience)
+                return;
+
+            provisionalXp += questDefinition.RewardPolicy.CompletionExperience;
+            if (!ImagineQuest.Student.StudentCloudConfig.Enabled)
+                ImagineQuest.Student.StudentStatusService.GetOrCreate().RecordLocalReward(
+                    "celestial-clock/" + (QuestSession.Instance?.AssignmentId ?? "practice") + "/completion",
+                    "Celestial Clock restored", "All four seals complete", questDefinition.RewardPolicy.CompletionExperience);
+        }
+
+        private void CloseCompletionPanel()
+        {
+            completionPanel.SetActive(false);
+            EnableDeckInput();
+        }
+
+        private void ReturnToStudentHub()
+        {
+            if (arenaOnly)
+            {
+                QuestSession.Instance?.Clear();
+                SceneTransition.LoadScene("ClassroomScene");
+            }
+            else
+            {
+                SceneTransition.LoadScene("QuestArena");
+            }
+        }
+
+        private void SaveRunSnapshot()
+        {
+            var session = QuestSession.Instance;
+            var questId = session == null || string.IsNullOrWhiteSpace(session.QuestId) ? "celestial-clock" : session.QuestId;
+            var classId = session == null ? string.Empty : session.ClassId;
+            var assignmentId = session == null ? questId : session.AssignmentId;
+            QuestProgressRepository.Instance?.SaveQuestRunSnapshot(questId, classId, assignmentId, completedNodeIds,
+                provisionalXp, questComplete);
+        }
+
+        private void UpdateHud()
+        {
+            if (sealText == null)
+                return;
+
+            sealText.text = "SEALS " + CompletedCount + " / " + stations.Count;
+            xpText.text = "PROVISIONAL XP  " + provisionalXp;
+            if (questComplete)
+            {
+                objectiveText.text = "The Celestial Clock is awake. The Aurora has a new course.";
+                return;
+            }
+
+            if (CompletedCount < RequiredSealsBeforeFinale)
+            {
+                objectiveText.text = "Restore the three learning seals on the deck. Read each Teaching Note before practice.";
+                return;
+            }
+
+            objectiveText.text = "The golden final seal is awake at the bow. Wake the Celestial Clock.";
+        }
+
+        public CelestialClockStation FindNearestAvailableStation(Vector3 position, float radius)
+        {
+            CelestialClockStation nearest = null;
+            var nearestDistance = radius;
+            foreach (var station in stations)
+            {
+                if (station.IsComplete || station.IsLocked)
+                    continue;
+
+                var distance = Vector3.Distance(position, station.transform.position);
+                if (distance < nearestDistance)
+                {
+                    nearestDistance = distance;
+                    nearest = station;
+                }
+            }
+            return nearest;
+        }
+
+        public void UpdateInteractionPrompt(CelestialClockStation station)
+        {
+            UpdateInteractionPrompt(station == null ? null : station.InteractionPrompt);
+        }
+
+        public void UpdateInteractionPrompt(string prompt)
+        {
+            if (interactionText == null) return;
+
+            if (string.IsNullOrWhiteSpace(prompt) || arrivingOnShip || videoVisible || lessonVisible ||
+                briefingVisible || pauseVisible || journalVisible || questComplete)
+            {
+                interactionText.gameObject.SetActive(false);
+                return;
+            }
+
+            interactionText.text = "PRESS  E  •  " + prompt;
+            interactionText.gameObject.SetActive(true);
+        }
+
+        private void EnableDeckInput()
+        {
+            if (playerController == null)
+                return;
+
+            playerController.SetInputEnabled(true);
+            Cursor.lockState = CursorLockMode.Locked;
+            Cursor.visible = false;
+        }
+
+        private static void UnlockCursor()
+        {
+            Cursor.lockState = CursorLockMode.None;
+            Cursor.visible = true;
+        }
+
+        private int CompletedCount
+        {
+            get
+            {
+                var count = 0;
+                foreach (var station in stations)
+                {
+                    if (station.IsComplete)
+                        count++;
+                }
+                return count;
+            }
+        }
+
+        private void SetAnswersVisible(bool visible)
+        {
+            foreach (var button in answerButtons)
+                button.gameObject.SetActive(visible);
+        }
+
+        private static void ConfigureLessonButton(Button button, string label, UnityEngine.Events.UnityAction action, Color color)
+        {
+            button.onClick.RemoveAllListeners();
+            button.onClick.AddListener(action);
+            button.GetComponentInChildren<TMP_Text>().text = label;
+            button.GetComponent<Image>().color = color;
+        }
+
+        internal static GameObject CreateFullOverlay(string name, Transform parent, Color color)
+        {
+            var overlay = new GameObject(name, typeof(RectTransform), typeof(Image));
+            overlay.transform.SetParent(parent, false);
+            var rect = overlay.GetComponent<RectTransform>();
+            rect.anchorMin = Vector2.zero;
+            rect.anchorMax = Vector2.one;
+            rect.offsetMin = Vector2.zero;
+            rect.offsetMax = Vector2.zero;
+            var image = overlay.GetComponent<Image>();
+            image.sprite = QuestUiAssetCache.SolidSprite;
+            image.color = color;
+            return overlay;
+        }
+
+        internal static GameObject CreatePanel(string name, Transform parent, Vector2 anchor, Vector2 size, Vector2 position, Color color, float outlineWidth)
+        {
+            var panel = new GameObject(name, typeof(RectTransform), typeof(Image), typeof(Outline));
+            panel.transform.SetParent(parent, false);
+            var rect = panel.GetComponent<RectTransform>();
+            rect.anchorMin = anchor;
+            rect.anchorMax = anchor;
+            rect.pivot = anchor == Vector2.zero ? Vector2.zero : new Vector2(0.5f, 0.5f);
+            rect.anchoredPosition = position;
+            rect.sizeDelta = size;
+            var image = panel.GetComponent<Image>();
+            image.sprite = QuestUiAssetCache.SolidSprite;
+            image.color = color;
+            var outline = panel.GetComponent<Outline>();
+            outline.effectColor = new Color(0.52f, 0.76f, 1f, 0.34f);
+            outline.effectDistance = new Vector2(outlineWidth * 0.08f, -outlineWidth * 0.08f);
+            return panel;
+        }
+
+        internal static TMP_Text CreateText(string name, Transform parent, Vector2 anchorMin, Vector2 anchorMax, Vector2 position,
+            Vector2 size, float fontSize, TextAlignmentOptions alignment, Color color)
+        {
+            var textObject = new GameObject(name, typeof(RectTransform), typeof(TextMeshProUGUI));
+            textObject.transform.SetParent(parent, false);
+            var rect = textObject.GetComponent<RectTransform>();
+            rect.anchorMin = anchorMin;
+            rect.anchorMax = anchorMax;
+            rect.pivot = new Vector2(anchorMin.x == anchorMax.x ? anchorMin.x : 0.5f, anchorMin.y == anchorMax.y ? anchorMin.y : 0.5f);
+            rect.anchoredPosition = position;
+            rect.sizeDelta = size;
+            var text = textObject.GetComponent<TextMeshProUGUI>();
+            text.font = TMP_Settings.defaultFontAsset;
+            text.fontSize = fontSize;
+            text.alignment = alignment;
+            text.color = color;
+            text.raycastTarget = false;
+            var shadow = textObject.AddComponent<Shadow>();
+            shadow.effectColor = new Color(0f, 0f, 0f, 0.62f);
+            shadow.effectDistance = new Vector2(1.5f, -1.5f);
+            return text;
+        }
+
+        internal static Button CreateButton(string name, Transform parent, string label, Vector2 anchorMin, Vector2 anchorMax,
+            Vector2 position, Vector2 size, Color color)
+        {
+            var buttonObject = new GameObject(name, typeof(RectTransform), typeof(Image), typeof(Button), typeof(Outline));
+            buttonObject.transform.SetParent(parent, false);
+            var rect = buttonObject.GetComponent<RectTransform>();
+            rect.anchorMin = anchorMin;
+            rect.anchorMax = anchorMax;
+            rect.pivot = new Vector2(anchorMin.x == anchorMax.x ? anchorMin.x : 0.5f, anchorMin.y == anchorMax.y ? anchorMin.y : 0.5f);
+            rect.anchoredPosition = position;
+            rect.sizeDelta = size;
+            var image = buttonObject.GetComponent<Image>();
+            image.sprite = QuestUiAssetCache.SolidSprite;
+            image.color = color;
+            var outline = buttonObject.GetComponent<Outline>();
+            outline.effectColor = new Color(0.89f, 0.78f, 0.42f, 0.68f);
+            outline.effectDistance = new Vector2(1.5f, -1.5f);
+            var button = buttonObject.GetComponent<Button>();
+            button.targetGraphic = image;
+            var colors = button.colors;
+            colors.normalColor = Color.white;
+            colors.highlightedColor = new Color(1f, 1f, 0.85f, 1f);
+            colors.pressedColor = new Color(0.72f, 0.82f, 1f, 1f);
+            colors.disabledColor = new Color(0.45f, 0.5f, 0.58f, 0.55f);
+            button.colors = colors;
+            var text = CreateText("Label", buttonObject.transform, Vector2.zero, Vector2.one, Vector2.zero, Vector2.zero,
+                20f, TextAlignmentOptions.Center, new Color(1f, 0.96f, 0.84f));
+            text.fontStyle = FontStyles.Bold;
+            text.text = label;
+            return button;
+        }
+
+        private static GameObject CreatePrimitive(string name, PrimitiveType type, Vector3 position, Vector3 scale, Material material)
+        {
+            var primitive = GameObject.CreatePrimitive(type);
+            primitive.name = name;
+            primitive.transform.position = position;
+            primitive.transform.localScale = scale;
+            var collider = primitive.GetComponent<Collider>();
+            if (collider != null)
+                collider.enabled = false;
+            var renderer = primitive.GetComponent<Renderer>();
+            if (renderer != null && material != null)
+                renderer.material = material;
+            return primitive;
+        }
+
+        private static Material CreateMaterial(Color color, bool emissive = false)
+        {
+            var shader = Shader.Find("Universal Render Pipeline/Lit") ?? Shader.Find("Standard") ?? Shader.Find("Sprites/Default");
+            var material = new Material(shader);
+            material.color = color;
+            if (emissive && material.HasProperty("_EmissionColor"))
+            {
+                material.EnableKeyword("_EMISSION");
+                material.SetColor("_EmissionColor", color * 1.8f);
+            }
+            return material;
+        }
+
+        private readonly struct DialogueLine
+        {
+            public DialogueLine(string speaker, string body)
+            {
+                Speaker = speaker;
+                Body = body;
+            }
+
+            public string Speaker { get; }
+            public string Body { get; }
+        }
+
+        private readonly struct StationLayout
+        {
+            public StationLayout(string nodeId, string ordinal, Vector3 position, Color accent, bool initiallyLocked)
+            {
+                NodeId = nodeId;
+                Ordinal = ordinal;
+                Position = position;
+                Accent = accent;
+                InitiallyLocked = initiallyLocked;
+            }
+
+            public string NodeId { get; }
+            public string Ordinal { get; }
+            public Vector3 Position { get; }
+            public Color Accent { get; }
+            public bool InitiallyLocked { get; }
+        }
+
+        private readonly struct DefinitionStationContent
+        {
+            public DefinitionStationContent(string nodeId, string displayTitle, string teachingNote, string question,
+                string[] answers, int correctIndex, int xpAward, Vector3 position, Color accent, bool initiallyLocked)
+            {
+                NodeId = nodeId;
+                DisplayTitle = displayTitle;
+                TeachingNote = teachingNote;
+                Question = question;
+                Answers = answers;
+                CorrectIndex = correctIndex;
+                XpAward = xpAward;
+                Position = position;
+                Accent = accent;
+                InitiallyLocked = initiallyLocked;
+            }
+
+            public string NodeId { get; }
+            public string DisplayTitle { get; }
+            public string TeachingNote { get; }
+            public string Question { get; }
+            public string[] Answers { get; }
+            public int CorrectIndex { get; }
+            public int XpAward { get; }
+            public Vector3 Position { get; }
+            public Color Accent { get; }
+            public bool InitiallyLocked { get; }
+        }
+    }
+
+    /// <summary>Data and visual state for one teaching + practice seal on the ship deck.</summary>
+    public sealed class CelestialClockStation : MonoBehaviour, IQuestArenaInteractable
+    {
+        private readonly List<Renderer> visuals = new List<Renderer>();
+        private CelestialClockQuestBootstrap owner;
+        private Color accent;
+        private Light beacon;
+        private Transform glyph;
+        private TextMeshPro label;
+        private bool locked;
+
+        public string NodeId { get; private set; }
+        public string Title { get; private set; }
+        public string ShortLabel { get; private set; }
+        public string TeachingNote { get; private set; }
+        public string Question { get; private set; }
+        public string[] Answers { get; private set; }
+        public int CorrectIndex { get; private set; }
+        public int XpAward { get; private set; }
+        public bool IsComplete { get; private set; }
+        public bool IsLocked => locked;
+        public Transform InteractionTransform => transform;
+        public string InteractionPrompt => "BEGIN " + ShortLabel;
+        public bool CanInteract => owner != null && !IsComplete && !IsLocked && enabled && gameObject.activeInHierarchy;
+
+        public void Configure(CelestialClockQuestBootstrap quest, string nodeId, string title, string teachingNote, string question,
+            string[] answers, int correctIndex, int xpAward, Color accentColor, bool initiallyLocked)
+        {
+            owner = quest;
+            NodeId = nodeId;
+            Title = title;
+            ShortLabel = title.Contains(".") ? title.Substring(title.IndexOf('.') + 1).Trim() : title;
+            TeachingNote = teachingNote;
+            Question = question;
+            Answers = answers;
+            CorrectIndex = correctIndex;
+            XpAward = xpAward;
+            accent = accentColor;
+            locked = initiallyLocked;
+        }
+
+        private void OnEnable() => QuestArenaInteractionRegistry.Register(this);
+        private void OnDisable() => QuestArenaInteractionRegistry.Unregister(this);
+        private void OnDestroy() => QuestArenaInteractionRegistry.Unregister(this);
+
+        public void Interact()
+        {
+            if (CanInteract)
+                owner.OpenStation(this);
+        }
+
+        public void RegisterVisual(Renderer renderer)
+        {
+            if (renderer != null)
+                visuals.Add(renderer);
+        }
+
+        public void RegisterBeacon(Light pointLight) => beacon = pointLight;
+        public void RegisterGlyph(Transform transformToRotate) => glyph = transformToRotate;
+        public void RegisterLabel(TextMeshPro stationLabel) => label = stationLabel;
+
+        public void SetLocked(bool value)
+        {
+            locked = value;
+            RefreshVisualState();
+        }
+
+        public void MarkCompleted()
+        {
+            IsComplete = true;
+            RefreshVisualState();
+        }
+
+        public void RefreshVisualState()
+        {
+            var color = IsComplete ? new Color(0.28f, 0.95f, 0.55f) : locked ? new Color(0.13f, 0.16f, 0.27f) : accent;
+            foreach (var renderer in visuals)
+            {
+                if (renderer == null)
+                    continue;
+                renderer.material.color = color;
+                if (renderer.material.HasProperty("_EmissionColor"))
+                    renderer.material.SetColor("_EmissionColor", color * (locked ? 0.25f : 1.7f));
+            }
+
+            if (beacon != null)
+            {
+                beacon.color = color;
+                beacon.intensity = locked ? 0.35f : IsComplete ? 3.7f : 2.7f;
+            }
+
+            if (label != null)
+            {
+                label.text = IsComplete ? ShortLabel + "\n✓ RESTORED" : locked ? "FINAL SEAL\nSLEEPING" : ShortLabel;
+                label.color = IsComplete ? new Color(0.63f, 1f, 0.75f) : locked ? new Color(0.52f, 0.58f, 0.72f) : new Color(1f, 0.94f, 0.75f);
+            }
+        }
+
+        private void Update()
+        {
+            if (glyph != null && !locked)
+                glyph.Rotate(0f, 45f * Time.deltaTime, 0f, Space.World);
+        }
+    }
+
+    /// <summary>Third-person ship controller with orbit camera and reusable interaction targeting.</summary>
+    public sealed class CelestialClockPlayerController : MonoBehaviour
+    {
+        private const float SprintMultiplier = 1.75f;
+        private readonly HashSet<int> animatorParameters = new HashSet<int>();
+        private CelestialClockQuestBootstrap quest;
+        private CharacterController characterController;
+        private Transform playerCamera;
+        private Transform cameraPivot;
+        private Animator animator;
+        private float movementSpeed;
+        private float sensitivity;
+        private float verticalVelocity;
+        private float lastGroundedTime = -100f;
+        private float lastJumpPressedTime = -100f;
+        private float pitch = 14f;
+        private float yaw;
+        private float cameraDistance = 1.25f;
+        private float targetCameraDistance = 1.25f;
+        private float cameraZoomVelocity;
+        private Vector3 horizontalVelocity;
+        private bool inputEnabled;
+        private Vector3? projectionAnchor;
+        private Vector3 projectionDirection;
+        private IQuestArenaInteractable nearbyInteraction;
+        private QuestArenaOutline focusedOutline;
+        private Vector3 respawnPoint;
+        private float arrivalProgress = 1f;
+
+        public void SetArrivalProgress(float progress) => arrivalProgress = Mathf.Clamp01(progress);
+
+        public void Configure(CelestialClockQuestBootstrap owner, float moveSpeed, float lookSensitivity)
+        {
+            quest = owner;
+            movementSpeed = moveSpeed;
+            sensitivity = lookSensitivity;
+        }
+
+        private void Awake()
+        {
+            characterController = GetComponent<CharacterController>();
+            respawnPoint = transform.position;
+            var camera = GetComponentInChildren<Camera>();
+            playerCamera = camera == null ? transform : camera.transform;
+            cameraPivot = camera == null ? transform : camera.transform.parent;
+            yaw = transform.eulerAngles.y;
+            RefreshCharacterAnimator();
+        }
+
+        public void RefreshCharacterAnimator()
+        {
+            animatorParameters.Clear();
+            animator = GetComponentInChildren<Animator>();
+            if (animator != null)
+            {
+                animator.applyRootMotion = false;
+                foreach (var parameter in animator.parameters)
+                    animatorParameters.Add(parameter.nameHash);
+                animator.Play(0, 0, 0f);
+                animator.Update(0f);
+                animator.speed = 1f;
+            }
+        }
+
+        public void SetInputEnabled(bool enabled)
+        {
+            inputEnabled = enabled;
+            if (!enabled)
+            {
+                QuestArenaOutline.SetRevealed(false);
+                horizontalVelocity = Vector3.zero;
+                if (animator != null)
+                    animator.SetFloat("Speed", 0f);
+            }
+            if (!enabled && quest != null)
+                quest.UpdateInteractionPrompt((string)null);
+        }
+
+        public void FocusProjection(Vector3? anchor)
+        {
+            projectionAnchor = anchor;
+            if (!anchor.HasValue) return;
+            projectionDirection = Vector3.ProjectOnPlane(playerCamera.position - anchor.Value, Vector3.up).normalized;
+            if (projectionDirection.sqrMagnitude < 0.01f) projectionDirection = -transform.forward;
+        }
+
+        private void Update()
+        {
+            var move = Vector2.zero;
+            var canReadInput = inputEnabled && Keyboard.current != null && Mouse.current != null;
+            QuestArenaOutline.SetRevealed(canReadInput &&
+                (Keyboard.current.leftAltKey.isPressed || Keyboard.current.rightAltKey.isPressed));
+            if (canReadInput)
+            {
+                if (Keyboard.current.wKey.isPressed) move.y += 1f;
+                if (Keyboard.current.sKey.isPressed) move.y -= 1f;
+                if (Keyboard.current.dKey.isPressed) move.x += 1f;
+                if (Keyboard.current.aKey.isPressed) move.x -= 1f;
+            }
+
+            var cameraForward = Vector3.ProjectOnPlane(playerCamera.forward, Vector3.up).normalized;
+            var cameraRight = Vector3.ProjectOnPlane(playerCamera.right, Vector3.up).normalized;
+            var direction = (cameraForward * move.y + cameraRight * move.x).normalized;
+            var hasMovementInput = direction.sqrMagnitude > 0.01f;
+            var sprinting = canReadInput && hasMovementInput && (Keyboard.current.leftShiftKey.isPressed || Keyboard.current.rightShiftKey.isPressed);
+            var targetSpeed = movementSpeed * (sprinting ? SprintMultiplier : 1f);
+            var desiredVelocity = direction * targetSpeed;
+            var velocityChangeRate = characterController.isGrounded ? (hasMovementInput ? 5.2f : 7.5f)
+                : (hasMovementInput ? 2.8f : 0.7f);
+            horizontalVelocity = Vector3.MoveTowards(horizontalVelocity, desiredVelocity, velocityChangeRate * Time.deltaTime);
+
+            if (characterController.isGrounded && verticalVelocity <= 0f)
+            {
+                lastGroundedTime = Time.time;
+                verticalVelocity = -2f;
+            }
+            if (canReadInput && Keyboard.current.spaceKey.wasPressedThisFrame)
+                lastJumpPressedTime = Time.time;
+            if (canReadInput && Time.time - lastJumpPressedTime <= 0.12f && Time.time - lastGroundedTime <= 0.1f)
+            {
+                verticalVelocity = Mathf.Sqrt(2f * 18f * 0.42f);
+                lastJumpPressedTime = -100f;
+                lastGroundedTime = -100f;
+            }
+            if (canReadInput && Keyboard.current.spaceKey.wasReleasedThisFrame && verticalVelocity > 0f)
+                verticalVelocity *= 0.5f;
+            verticalVelocity = Mathf.Max(-18f, verticalVelocity - (verticalVelocity > 0f ? 18f : 28f) * Time.deltaTime);
+
+            var groundedBeforeMove = characterController.isGrounded;
+            var positionBeforeMove = transform.position;
+            var collisions = characterController.Move((horizontalVelocity + Vector3.up * verticalVelocity) * Time.deltaTime);
+            if ((collisions & CollisionFlags.Above) != 0 && verticalVelocity > 0f) verticalVelocity = 0f;
+            if ((collisions & CollisionFlags.Below) != 0 && verticalVelocity < 0f) verticalVelocity = -2f;
+            if (groundedBeforeMove && verticalVelocity <= 0f)
+                FollowDescendingDeck();
+            // A second downward step adjustment changes CharacterController.velocity;
+            // measure displacement across both moves so stairs do not reset the blend.
+            var lateralSpeed = Vector3.ProjectOnPlane(transform.position - positionBeforeMove, Vector3.up).magnitude
+                / Mathf.Max(Time.deltaTime, 0.0001f);
+            if (lateralSpeed > 0.08f)
+                transform.rotation = Quaternion.Slerp(transform.rotation,
+                    Quaternion.LookRotation(horizontalVelocity.normalized), 6.5f * Time.deltaTime);
+
+            if (transform.position.y < -3f)
+            {
+                characterController.enabled = false;
+                transform.position = respawnPoint + Vector3.up * .06f;
+                characterController.enabled = true;
+                horizontalVelocity = Vector3.zero;
+                verticalVelocity = 0f;
+            }
+
+            if (!canReadInput)
+            {
+                UpdateAnimation(0f);
+                return;
+            }
+
+            var look = Cursor.lockState == CursorLockMode.Locked
+                ? Mouse.current.delta.ReadValue() * sensitivity : Vector2.zero;
+            yaw += look.x;
+            pitch = Mathf.Clamp(pitch - look.y, -35f, 68f);
+            var scroll = Mouse.current.scroll.ReadValue().y;
+            if (Mathf.Abs(scroll) > 0.01f)
+                targetCameraDistance = Mathf.Clamp(targetCameraDistance - Mathf.Sign(scroll) * 0.3f, 0.85f, 2.0f);
+
+            nearbyInteraction = QuestArenaInteractionRegistry.FindNearest(transform.position + Vector3.up * .68f, 1.65f, transform);
+            var nextOutline = (nearbyInteraction as Component)?.GetComponent<QuestArenaOutline>();
+            if (nextOutline != focusedOutline)
+            {
+                if (focusedOutline != null) focusedOutline.SetFocused(false);
+                focusedOutline = nextOutline;
+                if (focusedOutline != null) focusedOutline.SetFocused(true);
+            }
+            quest.UpdateInteractionPrompt(nearbyInteraction == null ? null : nearbyInteraction.InteractionPrompt);
+            if (Keyboard.current.eKey.wasPressedThisFrame && nearbyInteraction != null)
+                nearbyInteraction.Interact();
+
+            UpdateAnimation(lateralSpeed);
+        }
+
+        private void LateUpdate()
+        {
+            if (cameraPivot == null || playerCamera == null || cameraPivot == transform)
+                return;
+
+            if (projectionAnchor.HasValue)
+            {
+                playerCamera.position = projectionAnchor.Value + projectionDirection * 2.6f + Vector3.up * 0.2f;
+                playerCamera.rotation = Quaternion.LookRotation(projectionAnchor.Value - playerCamera.position, Vector3.up);
+                return;
+            }
+
+            cameraDistance = Mathf.SmoothDamp(cameraDistance, targetCameraDistance, ref cameraZoomVelocity, 0.075f);
+            float arrive = 1 - arrivalProgress;
+            cameraPivot.rotation = Quaternion.Euler(pitch + 13 * arrive, yaw - 62 * arrive, 0f);
+            var desiredDirection = -cameraPivot.forward;
+            var requestedDistance = cameraDistance + 1.6f * arrive;
+            var resolvedDistance = requestedDistance;
+            // Ignore the player's own capsule even if it is the first hit.
+            foreach (var hit in Physics.SphereCastAll(cameraPivot.position, 0.14f, desiredDirection, requestedDistance,
+                         Physics.DefaultRaycastLayers, QueryTriggerInteraction.Ignore))
+            {
+                if (hit.transform.IsChildOf(transform))
+                    continue;
+                resolvedDistance = Mathf.Min(resolvedDistance, Mathf.Max(0.3f, hit.distance - 0.1f));
+            }
+
+            playerCamera.position = cameraPivot.position + desiredDirection * resolvedDistance;
+            playerCamera.rotation = cameraPivot.rotation;
+        }
+
+        private void FollowDescendingDeck()
+        {
+            // Stay in contact when walking down steps; jumping and falling still use
+            // gravity. This cannot pull a player across a gap larger than a step.
+            var groundHeight = float.NegativeInfinity;
+            foreach (var hit in Physics.RaycastAll(transform.position + Vector3.up * 0.15f, Vector3.down,
+                         characterController.stepOffset + 0.2f, Physics.DefaultRaycastLayers,
+                         QueryTriggerInteraction.Ignore))
+            {
+                if (hit.transform.IsChildOf(transform) || hit.normal.y < 0.65f)
+                    continue;
+                groundHeight = Mathf.Max(groundHeight, hit.point.y);
+            }
+            var gap = transform.position.y - groundHeight;
+            if (gap > 0.005f && gap <= characterController.stepOffset)
+                characterController.Move(Vector3.down * gap);
+        }
+
+        private void UpdateAnimation(float lateralSpeed)
+        {
+            if (animator == null)
+                return;
+
+            var moving = lateralSpeed > 0.06f;
+            var normalizedSpeed = movementSpeed <= 0f || !moving ? 0f : lateralSpeed / movementSpeed;
+            // Idle, Walk and Run are three different clips in the blend tree. Speed
+            // 1 selects walking and speed 2 selects running once sprint velocity builds.
+            var blend = normalizedSpeed <= 1f ? normalizedSpeed : 1f + (normalizedSpeed - 1f) / (SprintMultiplier - 1f);
+            SetAnimatorFloat("Speed", Mathf.Clamp(blend, 0f, 2f));
+            SetAnimatorFloat("inputMagnitude", normalizedSpeed);
+            SetAnimatorBool("isGrounded", characterController.isGrounded && verticalVelocity <= 0f);
+            SetAnimatorFloat("VerticalSpeed", verticalVelocity);
+            SetAnimatorBool("isIdling", !moving);
+            SetAnimatorBool("isJumping", !characterController.isGrounded && verticalVelocity > 0f);
+            SetAnimatorBool("isFalling", !characterController.isGrounded && verticalVelocity <= 0f);
+        }
+
+        private void SetAnimatorFloat(string parameter, float value)
+        {
+            var hash = Animator.StringToHash(parameter);
+            if (animatorParameters.Contains(hash))
+                animator.SetFloat(hash, value, 0.12f, Time.deltaTime);
+        }
+
+        private void SetAnimatorBool(string parameter, bool value)
+        {
+            var hash = Animator.StringToHash(parameter);
+            if (animatorParameters.Contains(hash))
+                animator.SetBool(hash, value);
+        }
+    }
+
+    internal sealed class CelestialPulse : MonoBehaviour
+    {
+        private float amplitude;
+        private float speed;
+        private Vector3 initialScale;
+
+        public void Configure(float pulseAmplitude, float pulseSpeed)
+        {
+            amplitude = pulseAmplitude;
+            speed = pulseSpeed;
+            initialScale = transform.localScale;
+        }
+
+        private void Start()
+        {
+            if (initialScale == Vector3.zero)
+                initialScale = transform.localScale;
+        }
+
+        private void Update()
+        {
+            var pulse = 1f + Mathf.Sin(Time.time * speed) * amplitude;
+            transform.localScale = initialScale * pulse;
+        }
+    }
+
+    internal sealed class CelestialOceanMotion : MonoBehaviour
+    {
+        private float amplitude;
+        private float speed;
+        private float baseHeight;
+
+        public void Configure(float bobAmplitude, float bobSpeed)
+        {
+            amplitude = bobAmplitude;
+            speed = bobSpeed;
+            baseHeight = transform.position.y;
+        }
+
+        private void Start()
+        {
+            if (Mathf.Approximately(baseHeight, 0f))
+                baseHeight = transform.position.y;
+        }
+
+        private void Update()
+        {
+            var position = transform.position;
+            position.y = baseHeight + Mathf.Sin(Time.time * speed) * amplitude;
+            transform.position = position;
+        }
+    }
+
+    internal sealed class CelestialStarfieldDrift : MonoBehaviour
+    {
+        private float speed;
+        public void Configure(float driftSpeed) => speed = driftSpeed;
+        private void Update() => transform.Rotate(0f, speed * Time.deltaTime, 0f, Space.World);
+    }
+
+    internal sealed class CelestialBillboard : MonoBehaviour
+    {
+        private void LateUpdate()
+        {
+            var camera = Camera.main;
+            if (camera == null)
+                return;
+            var direction = transform.position - camera.transform.position;
+            if (direction.sqrMagnitude > 0.0001f)
+                transform.rotation = Quaternion.LookRotation(direction);
+        }
+    }
+
+    internal static class QuestUiAssetCache
+    {
+        private static Sprite solidSprite;
+        public static Sprite SolidSprite
+        {
+            get
+            {
+                if (solidSprite == null)
+                    solidSprite = Sprite.Create(Texture2D.whiteTexture, new Rect(0f, 0f, 1f, 1f), new Vector2(0.5f, 0.5f));
+                return solidSprite;
+            }
+        }
+    }
+}

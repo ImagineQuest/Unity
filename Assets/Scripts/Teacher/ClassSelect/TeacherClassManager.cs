@@ -1,14 +1,22 @@
+// Script: TeacherClassManager
+// Path: Assets/Scripts/Teacher/ClassSelect/TeacherClassManager.cs
+// Purpose: Handles teacher class CRUD, selection, and list rendering.
+
 using System.Collections;
 using System.Collections.Generic;
+using System.Text;
 using TMPro;
 using UnityEngine;
 using UnityEngine.UI;
 using Firebase.Auth;
 using Firebase.Firestore;
 using UnityEngine.SceneManagement;
+using System.Linq;
 
 public class TeacherClassManager : MonoBehaviour
 {
+    static Sprite _solidUiSprite;
+
     [Header("Panels")]
     [SerializeField] private GameObject classListPanel;
     [SerializeField] private GameObject editPanel;
@@ -19,11 +27,19 @@ public class TeacherClassManager : MonoBehaviour
     [SerializeField] private GameObject classListItemPrefab;   // prefab with children: "ClassName" (TMP_Text), "ClassCode" (TMP_Text)
     [SerializeField] private GameObject emptyListGraphic;      // "You have no classes"
 
+    [Header("Class Details UI")]
+    [SerializeField] private TMP_Text classInviteCodeText;
+    [SerializeField] private TMP_Text studentsListText;
+
     [Header("Pagination")]
     [SerializeField] private Button prevPageBtn;
     [SerializeField] private Button nextPageBtn;
     [SerializeField] private TMP_Text pageLabel;
     [SerializeField] private int pageSize = 6;
+
+    [Header("Card Layout")]
+    [SerializeField] private float classCardHeight = 80f;
+    [SerializeField] private float fallbackClassCardWidth = 760f;
 
     [Header("Create Class Panel")]
     [SerializeField] private TMP_InputField createClassNameInput;    // input field in CreateClassPanel
@@ -41,9 +57,19 @@ public class TeacherClassManager : MonoBehaviour
     [SerializeField] private Button createBtn;   // createBtn (shows create panel)
     [SerializeField] private Button editBtn;     // editBtn (shows edit panel)
 
-    [Header("Selection Visuals")]
-    [SerializeField] private Color unselectedColor = new Color(1f, 1f, 1f, 1f);
-    [SerializeField] private Color selectedColor   = new Color(0.85f, 0.92f, 1f, 1f); // light blue
+    [Header("Class row look")]
+    [SerializeField] private Color rowFill = new Color(0.16f, 0.13f, 0.08f, 0.48f);
+    [SerializeField] private Color rowFillHighlight = new Color(0.26f, 0.2f, 0.13f, 0.62f);
+    [SerializeField] private Color rowFillPressed = new Color(0.11f, 0.09f, 0.06f, 0.72f);
+    [SerializeField] private Color accentBarColor = new Color(0.98f, 0.86f, 0.58f, 0.85f);
+    [SerializeField] private Color outlineColor = new Color(1f, 0.95f, 0.82f, 0.24f);
+    [SerializeField] private Color titleColor = new Color(1f, 0.98f, 0.9f, 0.96f);
+    [SerializeField] private Color subtitleColor = new Color(0.98f, 0.93f, 0.82f, 0.78f);
+    [SerializeField] private Color chevronColor = new Color(1f, 0.9f, 0.7f, 0.82f);
+    [SerializeField] private Color shadowColor = new Color(0f, 0f, 0f, 0.16f);
+
+    [Header("Font")]
+    [SerializeField] private TMP_FontAsset cardFont;
 
     private FirebaseAuth auth;
     private FirebaseFirestore db;
@@ -71,6 +97,8 @@ public class TeacherClassManager : MonoBehaviour
 
     void Start()
     {
+        ApplyCreateClassPanelPolish();
+
         // Wire up buttons
         if (joinBtn) joinBtn.onClick.AddListener(JoinSelected);
         if (createBtn) createBtn.onClick.AddListener(ShowCreatePanel);
@@ -81,15 +109,566 @@ public class TeacherClassManager : MonoBehaviour
         if (prevPageBtn) prevPageBtn.onClick.AddListener(PrevPage);
         if (nextPageBtn) nextPageBtn.onClick.AddListener(NextPage);
 
-        // Start with list panel visible
-        ShowListPanel();
-        StartCoroutine(LoadClasses());
+        bool isClassSelectMode = classListContainer != null;
+        if (isClassSelectMode)
+        {
+            ShowListPanel();
+            StartCoroutine(LoadClasses());
+        }
+        else
+        {
+            ApplyClassDetailPolish();
+            EnsureBackButtonWiring();
+            StartCoroutine(LoadSelectedClassDetailsRoutine());
+        }
+    }
+
+    private void ApplyCreateClassPanelPolish()
+    {
+        if (createClassPanel == null)
+            return;
+
+        var panelRect = createClassPanel.GetComponent<RectTransform>();
+        if (panelRect != null)
+        {
+            panelRect.anchorMin = new Vector2(0.5f, 0.5f);
+            panelRect.anchorMax = new Vector2(0.5f, 0.5f);
+            panelRect.pivot = new Vector2(0.5f, 0.5f);
+            panelRect.anchoredPosition = new Vector2(0f, 12f);
+            panelRect.sizeDelta = new Vector2(660f, 360f);
+        }
+
+        var panelImage = createClassPanel.GetComponent<Image>();
+        if (panelImage != null)
+        {
+            panelImage.sprite = null;
+            panelImage.color = new Color(0.035f, 0.027f, 0.02f, 0.96f);
+        }
+
+        var outline = createClassPanel.GetComponent<Outline>();
+        if (outline == null)
+            outline = createClassPanel.AddComponent<Outline>();
+        outline.effectColor = new Color(0.82f, 0.65f, 0.30f, 0.62f);
+        outline.effectDistance = new Vector2(2f, -2f);
+
+        RectTransform title = FindPanelRect(createClassPanel, "CreateTitle");
+        if (title != null)
+        {
+            SetRect(title, new Vector2(0.5f, 1f), new Vector2(0.5f, 1f),
+                new Vector2(0f, -34f), new Vector2(560f, 58f), new Vector2(0.5f, 1f));
+            var text = title.GetComponent<TMP_Text>();
+            if (text != null)
+            {
+                text.text = "Create a New Class";
+                text.fontSize = 42f;
+                text.fontStyle = FontStyles.Bold;
+                text.color = new Color(1f, 0.92f, 0.68f, 1f);
+                text.alignment = TextAlignmentOptions.Center;
+            }
+        }
+
+        RectTransform label = FindPanelRect(createClassPanel, "ClassNameLabel");
+        if (label != null)
+        {
+            SetRect(label, new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f),
+                new Vector2(-230f, 54f), new Vector2(120f, 32f), new Vector2(0f, 0.5f));
+            var text = label.GetComponent<TMP_Text>();
+            if (text != null)
+            {
+                text.text = "CLASS NAME";
+                text.fontSize = 19f;
+                text.fontStyle = FontStyles.Bold;
+                text.color = new Color(0.92f, 0.82f, 0.62f, 0.9f);
+                text.alignment = TextAlignmentOptions.MidlineLeft;
+            }
+        }
+
+        if (createClassNameInput != null)
+        {
+            var inputRect = createClassNameInput.GetComponent<RectTransform>();
+            SetRect(inputRect, new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f),
+                new Vector2(0f, 6f), new Vector2(520f, 62f), new Vector2(0.5f, 0.5f));
+            var inputImage = createClassNameInput.targetGraphic as Image;
+            if (inputImage != null)
+            {
+                inputImage.sprite = null;
+                inputImage.color = new Color(0.09f, 0.07f, 0.045f, 0.96f);
+            }
+            if (createClassNameInput.textComponent != null)
+            {
+                createClassNameInput.textComponent.fontSize = 25f;
+                createClassNameInput.textComponent.color = new Color(1f, 0.96f, 0.84f, 1f);
+            }
+            var placeholder = createClassNameInput.placeholder as TMP_Text;
+            if (placeholder != null)
+            {
+                placeholder.text = "e.g. Grade 6 Explorers";
+                placeholder.fontSize = 23f;
+                placeholder.color = new Color(0.72f, 0.65f, 0.53f, 0.76f);
+            }
+        }
+
+        RectTransform buttonRow = FindPanelRect(createClassPanel, "ButtonRow");
+        if (buttonRow != null)
+        {
+            SetRect(buttonRow, new Vector2(0.5f, 0f), new Vector2(0.5f, 0f),
+                new Vector2(0f, 38f), new Vector2(450f, 58f), new Vector2(0.5f, 0f));
+        }
+
+        StyleDialogButton(createConfirmBtn, "CREATE CLASS", true);
+        var cancel = FindPanelRect(createClassPanel, "CreateCancelBtn");
+        StyleDialogButton(cancel != null ? cancel.GetComponent<Button>() : null, "CANCEL", false);
+    }
+
+    private void ApplyClassDetailPolish()
+    {
+        Canvas sceneCanvas = FindSceneCanvas();
+        if (sceneCanvas != null)
+        {
+            var scaler = sceneCanvas.GetComponent<CanvasScaler>();
+            if (scaler != null)
+            {
+                scaler.uiScaleMode = CanvasScaler.ScaleMode.ScaleWithScreenSize;
+                scaler.referenceResolution = new Vector2(1920f, 1080f);
+                scaler.screenMatchMode = CanvasScaler.ScreenMatchMode.MatchWidthOrHeight;
+                scaler.matchWidthOrHeight = 0.5f;
+            }
+        }
+
+        var background = FindSceneRect("Background");
+        if (background != null)
+        {
+            background.anchorMin = Vector2.zero;
+            background.anchorMax = Vector2.one;
+            background.pivot = new Vector2(0.5f, 0.5f);
+            background.anchoredPosition = Vector2.zero;
+            background.sizeDelta = Vector2.zero;
+        }
+
+        var panel = FindSceneRect("StudentListPanel");
+        if (panel != null)
+        {
+            panel.anchorMin = new Vector2(0.10f, 0.16f);
+            panel.anchorMax = new Vector2(0.90f, 0.84f);
+            panel.pivot = new Vector2(0.5f, 0.5f);
+            panel.anchoredPosition = Vector2.zero;
+            panel.sizeDelta = Vector2.zero;
+
+            var image = panel.GetComponent<Image>();
+            if (image != null)
+            {
+                image.sprite = null;
+                image.color = new Color(0.035f, 0.026f, 0.018f, 0.91f);
+            }
+
+            var outline = panel.GetComponent<Outline>();
+            if (outline == null)
+                outline = panel.gameObject.AddComponent<Outline>();
+            outline.effectColor = new Color(0.88f, 0.71f, 0.38f, 0.52f);
+            outline.effectDistance = new Vector2(2f, -2f);
+
+            EnsureClassDetailHeading(panel);
+        }
+
+        if (classInviteCodeText != null)
+        {
+            var rect = classInviteCodeText.rectTransform;
+            rect.anchorMin = new Vector2(0.63f, 0.87f);
+            rect.anchorMax = new Vector2(0.96f, 0.97f);
+            rect.pivot = new Vector2(1f, 0.5f);
+            rect.anchoredPosition = Vector2.zero;
+            rect.sizeDelta = Vector2.zero;
+            classInviteCodeText.fontSize = 24f;
+            classInviteCodeText.fontStyle = FontStyles.Bold;
+            classInviteCodeText.alignment = TextAlignmentOptions.MidlineRight;
+            classInviteCodeText.color = new Color(1f, 0.88f, 0.58f, 1f);
+        }
+
+        if (studentsListText != null)
+        {
+            var rect = studentsListText.rectTransform;
+            rect.anchorMin = new Vector2(0.05f, 0.12f);
+            rect.anchorMax = new Vector2(0.61f, 0.70f);
+            rect.pivot = new Vector2(0f, 1f);
+            rect.anchoredPosition = Vector2.zero;
+            rect.sizeDelta = Vector2.zero;
+            studentsListText.fontSize = 28f;
+            studentsListText.fontStyle = FontStyles.Normal;
+            studentsListText.alignment = TextAlignmentOptions.TopLeft;
+            studentsListText.color = new Color(1f, 0.96f, 0.84f, 0.96f);
+        }
+
+        StyleClassDetailButton("BackBtn", new Vector2(0f, 0f), new Vector2(0f, 0f),
+            new Vector2(48f, 44f), "BACK");
+        StyleClassDetailButton("SignoutBtn", new Vector2(1f, 0f), new Vector2(1f, 0f),
+            new Vector2(-48f, 44f), "SIGN OUT");
+    }
+
+    private void EnsureClassDetailHeading(RectTransform panel)
+    {
+        Transform existing = panel.Find("ClassDetailHeading");
+        TMP_Text heading;
+        if (existing == null)
+        {
+            var go = new GameObject("ClassDetailHeading", typeof(RectTransform), typeof(TextMeshProUGUI));
+            go.transform.SetParent(panel, false);
+            heading = go.GetComponent<TextMeshProUGUI>();
+        }
+        else
+        {
+            heading = existing.GetComponent<TMP_Text>();
+        }
+
+        if (heading == null)
+            return;
+
+        var rect = heading.rectTransform;
+        rect.anchorMin = new Vector2(0.05f, 0.84f);
+        rect.anchorMax = new Vector2(0.60f, 0.97f);
+        rect.pivot = new Vector2(0f, 0.5f);
+        rect.anchoredPosition = Vector2.zero;
+        rect.sizeDelta = Vector2.zero;
+        heading.text = string.IsNullOrWhiteSpace(ClassSelection.CurrentClassName)
+            ? "CLASS COMMAND DECK"
+            : ClassSelection.CurrentClassName.ToUpperInvariant();
+        heading.fontSize = 38f;
+        heading.fontStyle = FontStyles.Bold;
+        heading.alignment = TextAlignmentOptions.MidlineLeft;
+        heading.color = new Color(1f, 0.94f, 0.76f, 1f);
+        heading.raycastTarget = false;
+
+        Transform rosterExisting = panel.Find("CrewRosterHeading");
+        TMP_Text rosterHeading;
+        if (rosterExisting == null)
+        {
+            var go = new GameObject("CrewRosterHeading", typeof(RectTransform), typeof(TextMeshProUGUI));
+            go.transform.SetParent(panel, false);
+            rosterHeading = go.GetComponent<TextMeshProUGUI>();
+        }
+        else
+        {
+            rosterHeading = rosterExisting.GetComponent<TMP_Text>();
+        }
+
+        if (rosterHeading == null)
+            return;
+
+        var rosterRect = rosterHeading.rectTransform;
+        rosterRect.anchorMin = new Vector2(0.05f, 0.70f);
+        rosterRect.anchorMax = new Vector2(0.61f, 0.79f);
+        rosterRect.pivot = new Vector2(0f, 0.5f);
+        rosterRect.anchoredPosition = Vector2.zero;
+        rosterRect.sizeDelta = Vector2.zero;
+        rosterHeading.text = "CREW ROSTER";
+        rosterHeading.fontSize = 19f;
+        rosterHeading.fontStyle = FontStyles.Bold;
+        rosterHeading.alignment = TextAlignmentOptions.MidlineLeft;
+        rosterHeading.color = new Color(0.87f, 0.70f, 0.40f, 1f);
+        rosterHeading.raycastTarget = false;
+    }
+
+    private void StyleClassDetailButton(string name, Vector2 anchorMin, Vector2 anchorMax,
+        Vector2 position, string label)
+    {
+        var rect = FindSceneRect(name);
+        if (rect == null)
+            return;
+
+        rect.anchorMin = anchorMin;
+        rect.anchorMax = anchorMax;
+        rect.pivot = anchorMin.x < 0.5f ? Vector2.zero : new Vector2(1f, 0f);
+        rect.anchoredPosition = position;
+        rect.sizeDelta = new Vector2(170f, 54f);
+        StyleDialogButton(rect.GetComponent<Button>(), label, false);
+    }
+
+    private Canvas FindSceneCanvas()
+    {
+        var scene = SceneManager.GetActiveScene();
+        foreach (var root in scene.GetRootGameObjects())
+        {
+            var canvas = root.GetComponentInChildren<Canvas>(true);
+            if (canvas != null)
+                return canvas;
+        }
+
+        return null;
+    }
+
+    private RectTransform FindSceneRect(string objectName)
+    {
+        var scene = SceneManager.GetActiveScene();
+        foreach (var root in scene.GetRootGameObjects())
+        {
+            foreach (var rect in root.GetComponentsInChildren<RectTransform>(true))
+            {
+                if (rect != null && rect.name == objectName)
+                    return rect;
+            }
+        }
+
+        return null;
+    }
+
+    private static RectTransform FindPanelRect(GameObject panel, string objectName)
+    {
+        foreach (var rect in panel.GetComponentsInChildren<RectTransform>(true))
+        {
+            if (rect != null && rect.name == objectName)
+                return rect;
+        }
+
+        return null;
+    }
+
+    private static void SetRect(RectTransform rect, Vector2 anchorMin, Vector2 anchorMax,
+        Vector2 position, Vector2 size, Vector2 pivot)
+    {
+        if (rect == null)
+            return;
+        rect.anchorMin = anchorMin;
+        rect.anchorMax = anchorMax;
+        rect.pivot = pivot;
+        rect.anchoredPosition = position;
+        rect.sizeDelta = size;
+    }
+
+    private static void StyleDialogButton(Button button, string label, bool primary)
+    {
+        if (button == null)
+            return;
+
+        var image = button.targetGraphic as Image;
+        if (image != null)
+        {
+            image.sprite = null;
+            image.color = primary
+                ? new Color(0.45f, 0.30f, 0.09f, 0.98f)
+                : new Color(0.16f, 0.12f, 0.075f, 0.96f);
+        }
+
+        var text = button.GetComponentInChildren<TMP_Text>(true);
+        if (text != null)
+        {
+            text.text = label;
+            text.fontSize = 22f;
+            text.fontStyle = FontStyles.Bold;
+            text.color = new Color(1f, 0.92f, 0.70f, 1f);
+            text.alignment = TextAlignmentOptions.Center;
+        }
+    }
+
+    private void EnsureBackButtonWiring()
+    {
+        GameObject backObj = GameObject.Find("BackBtn");
+        if (backObj == null)
+            return;
+
+        var btn = backObj.GetComponent<Button>();
+        if (btn == null)
+            return;
+
+        btn.onClick.RemoveAllListeners();
+        btn.onClick.AddListener(BackToClassSelect);
+    }
+
+    private void EnsureEditListButton()
+    {
+        if (GameObject.Find("EditListBtn") != null)
+            return;
+
+        GameObject backObj = GameObject.Find("BackBtn");
+        if (backObj == null)
+            return;
+
+        Transform parent = backObj.transform.parent;
+        if (parent == null)
+            return;
+
+        GameObject editListObj = Instantiate(backObj, parent);
+        editListObj.name = "EditListBtn";
+
+        var rect = editListObj.GetComponent<RectTransform>();
+        if (rect != null)
+        {
+            rect.anchorMin = new Vector2(0.5f, 0f);
+            rect.anchorMax = new Vector2(0.5f, 0f);
+            rect.pivot = new Vector2(0.5f, 0f);
+            rect.anchoredPosition = new Vector2(-329f, 65f);
+        }
+
+        var text = editListObj.GetComponentInChildren<TMP_Text>();
+        if (text != null)
+            text.text = "edit list";
+
+        var btn = editListObj.GetComponent<Button>();
+        if (btn != null)
+        {
+            // Disable inherited persistent listeners (e.g. BackToClassSelect from BackBtn clone)
+            for (int i = 0; i < btn.onClick.GetPersistentEventCount(); i++)
+                btn.onClick.SetPersistentListenerState(i, UnityEngine.Events.UnityEventCallState.Off);
+            btn.onClick.RemoveAllListeners();
+            btn.onClick.AddListener(EditList_NoOp);
+        }
+    }
+
+    private IEnumerator LoadSelectedClassDetailsRoutine()
+    {
+        string classId = ClassSelection.CurrentClassId;
+        string classCode = ClassSelection.CurrentClassCode;
+
+        if (classInviteCodeText)
+            classInviteCodeText.text = string.IsNullOrEmpty(classCode) ? "Class: [Class Code]" : $"Class: {classCode}";
+
+        if (studentsListText)
+            studentsListText.text = "Loading students...";
+
+        if (string.IsNullOrEmpty(classId))
+        {
+            if (studentsListText) studentsListText.text = "No class selected.";
+            yield break;
+        }
+
+        // Refresh class code from Firestore in case static selection was lost or stale.
+        var classTask = db.Collection("classes").Document(classId).GetSnapshotAsync();
+        yield return new WaitUntil(() => classTask.IsCompleted);
+
+        if (!classTask.IsFaulted && !classTask.IsCanceled && classTask.Result.Exists && classTask.Result.ContainsField("code"))
+        {
+            classCode = classTask.Result.GetValue<string>("code");
+            ClassSelection.CurrentClassCode = classCode;
+        }
+
+        if (classInviteCodeText)
+            classInviteCodeText.text = string.IsNullOrEmpty(classCode) ? "Class: [No Code]" : $"Class: {classCode}";
+
+        var membersTask = db.Collection("classes").Document(classId).Collection("members").GetSnapshotAsync();
+        yield return new WaitUntil(() => membersTask.IsCompleted);
+
+        if (membersTask.IsFaulted || membersTask.IsCanceled)
+        {
+            Debug.LogError("Failed to load class members: " + membersTask.Exception);
+            if (studentsListText) studentsListText.text = "Failed to load students.";
+            yield break;
+        }
+
+        var memberNames = new List<string>();
+        foreach (var memberDoc in membersTask.Result.Documents)
+        {
+            string uid = memberDoc.Id;
+
+            string memberFirst = memberDoc.ContainsField("firstName") ? memberDoc.GetValue<string>("firstName") : "";
+            string memberLast = memberDoc.ContainsField("lastName") ? memberDoc.GetValue<string>("lastName") : "";
+            string memberFull = NormalizeHumanName(($"{memberFirst} {memberLast}").Trim());
+            if (!string.IsNullOrEmpty(memberFull))
+            {
+                memberNames.Add(memberFull);
+                continue;
+            }
+
+            var userTask = db.Collection("users").Document(uid).GetSnapshotAsync();
+            yield return new WaitUntil(() => userTask.IsCompleted);
+
+            if (userTask.IsFaulted || userTask.IsCanceled)
+            {
+                memberNames.Add("Unknown Student");
+                continue;
+            }
+
+            if (!userTask.Result.Exists)
+            {
+                memberNames.Add("Unknown Student");
+                continue;
+            }
+
+            string displayName = FormatDisplayName(userTask.Result, uid);
+            memberNames.Add(displayName);
+        }
+
+        if (studentsListText)
+        {
+            if (memberNames.Count == 0)
+            {
+                studentsListText.text = "No students have joined yet.";
+            }
+            else
+            {
+                var sb = new StringBuilder();
+                for (int i = 0; i < memberNames.Count; i++)
+                {
+                    sb.Append(i + 1).Append(". ").Append(memberNames[i]);
+                    if (i < memberNames.Count - 1) sb.AppendLine();
+                }
+                studentsListText.text = sb.ToString();
+            }
+        }
+    }
+
+    private string FormatDisplayName(DocumentSnapshot userDoc, string fallbackUid)
+    {
+        string firstName = NormalizeHumanName(GetFirstNonEmptyField(userDoc, "firstName", "firstname", "first_name"));
+        string lastName = NormalizeHumanName(GetFirstNonEmptyField(userDoc, "lastName", "lastname", "last_name"));
+        string username = NormalizeHumanName(GetFirstNonEmptyField(userDoc, "username", "displayName", "name"));
+        string fullNameField = NormalizeHumanName(GetFirstNonEmptyField(userDoc, "fullName", "full_name"));
+
+        string fullName = ($"{firstName} {lastName}").Trim();
+        if (!string.IsNullOrEmpty(fullName)) return fullName;
+        if (!string.IsNullOrEmpty(fullNameField)) return fullNameField;
+        if (!string.IsNullOrEmpty(username)) return username;
+        return "Unknown Student";
+    }
+
+    private string GetFirstNonEmptyField(DocumentSnapshot doc, params string[] fieldNames)
+    {
+        for (int i = 0; i < fieldNames.Length; i++)
+        {
+            string field = fieldNames[i];
+            if (!doc.ContainsField(field)) continue;
+
+            string value = doc.GetValue<string>(field);
+            if (!string.IsNullOrWhiteSpace(value))
+                return value.Trim();
+        }
+
+        return "";
+    }
+
+    private string NormalizeHumanName(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return "";
+
+        string trimmed = value.Trim();
+        if (LooksLikeIdentifier(trimmed))
+            return "";
+
+        return trimmed;
+    }
+
+    private bool LooksLikeIdentifier(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return false;
+
+        // Firebase-like IDs/user IDs are usually long, compact, and have no spaces.
+        if (value.Length < 16 || value.Contains(" "))
+            return false;
+
+        for (int i = 0; i < value.Length; i++)
+        {
+            char c = value[i];
+            bool isAlphaNum = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9');
+            bool isAllowed = isAlphaNum || c == '_' || c == '-';
+            if (!isAllowed)
+                return false;
+        }
+
+        return true;
     }
 
     // Panel Management
 
-    // Show class list panel
-    private void ShowListPanel()
+    public void ShowListPanel()
     {
         if (classListPanel) classListPanel.SetActive(true);
         if (editPanel) editPanel.SetActive(false);
@@ -209,6 +788,7 @@ public class TeacherClassManager : MonoBehaviour
         var now = Timestamp.GetCurrentTimestamp();
         var classData = new Dictionary<string, object> {
             { "id", classRef.Id }, { "name", className }, { "code", code },
+            { "codeNormalized", code },
             { "ownerUid", user.UserId }, { "createdAt", now }, { "updatedAt", now }
         };
         var createTask = classRef.SetAsync(classData);
@@ -218,13 +798,13 @@ public class TeacherClassManager : MonoBehaviour
         // Index under teacher for quick listing
         var idxRef  = db.Collection("users").Document(user.UserId).Collection("classes").Document(classRef.Id);
         var idxData = new Dictionary<string, object> {
-            { "id", classRef.Id }, { "name", className }, { "code", code }, { "createdAt", now }
+            { "id", classRef.Id }, { "name", className }, { "code", code }, { "createdAt", now },
+            { "membershipRole", "teacher" }
         };
         var mapTask = idxRef.SetAsync(idxData);
         yield return new WaitUntil(() => mapTask.IsCompleted);
         if (mapTask.IsFaulted || mapTask.IsCanceled) { Debug.LogError(mapTask.Exception); yield break; }
 
-        // Go back to list and refresh
         ShowListPanel();
         yield return StartCoroutine(LoadClasses());
     }
@@ -245,29 +825,38 @@ public class TeacherClassManager : MonoBehaviour
         var user = auth.CurrentUser;
         if (user == null) yield break;
 
-        // Get class index for current user
-        var q = db.Collection("users").Document(user.UserId).Collection("classes");
-        var task = q.GetSnapshotAsync();
-        yield return new WaitUntil(() => task.IsCompleted);
-        if (task.IsFaulted || task.IsCanceled) { Debug.LogError(task.Exception); yield break; }
+        var byId = new Dictionary<string, ClassRow>();
+
+        var indexQuery = db.Collection("users").Document(user.UserId).Collection("classes");
+        var indexTask = indexQuery.GetSnapshotAsync();
+        yield return new WaitUntil(() => indexTask.IsCompleted);
+        if (indexTask.IsFaulted || indexTask.IsCanceled) { Debug.LogError(indexTask.Exception); yield break; }
+
+        foreach (var d in indexTask.Result)
+            UpsertRow(byId, SnapshotToRow(d));
+
+        var ownedQuery = db.Collection("classes").WhereEqualTo("ownerUid", user.UserId);
+        var ownedTask = ownedQuery.GetSnapshotAsync();
+        yield return new WaitUntil(() => ownedTask.IsCompleted);
+        if (ownedTask.IsFaulted || ownedTask.IsCanceled)
+        {
+            Debug.LogError("[TCM] Failed loading owned classes fallback: " + ownedTask.Exception);
+        }
+        else
+        {
+            foreach (var d in ownedTask.Result)
+            {
+                var row = SnapshotToRow(d);
+                bool wasMissingInIndex = !byId.ContainsKey(row.id);
+                UpsertRow(byId, row);
+
+                if (wasMissingInIndex)
+                    yield return StartCoroutine(RepairTeacherIndexRow(user.UserId, row));
+            }
+        }
 
         _all.Clear();
-        // Populate from index
-        foreach (var d in task.Result)
-        {
-            string id   = d.ContainsField("id")   ? d.GetValue<string>("id")   : d.Id;
-            string name = d.ContainsField("name") ? d.GetValue<string>("name") : "(Unnamed)";
-            string code = d.ContainsField("code") ? d.GetValue<string>("code") : "—";
-
-            long createdAtSec = 0;
-            if (d.ContainsField("createdAt"))
-            {
-                var ts = d.GetValue<Firebase.Firestore.Timestamp>("createdAt");
-                createdAtSec = (long)(ts.ToDateTime().ToUniversalTime() - System.DateTime.UnixEpoch).TotalSeconds;
-            }
-
-            _all.Add(new ClassRow { id = id, name = name, code = code, createdAtSeconds = createdAtSec });
-        }
+        _all.AddRange(byId.Values.Where(r => !string.IsNullOrEmpty(r.id)));
 
         // Sort newest → oldest
         _all.Sort((a, b) => b.createdAtSeconds.CompareTo(a.createdAtSeconds));
@@ -286,6 +875,86 @@ public class TeacherClassManager : MonoBehaviour
         RenderPage();
     }
 
+    private ClassRow SnapshotToRow(DocumentSnapshot d)
+    {
+        string id = d.ContainsField("id") ? d.GetValue<string>("id") : d.Id;
+        string name = d.ContainsField("name") ? d.GetValue<string>("name") : "(Unnamed)";
+        string code = d.ContainsField("code") ? d.GetValue<string>("code") : "—";
+
+        long createdAtSec = 0;
+        if (d.ContainsField("createdAt"))
+        {
+            var ts = d.GetValue<Firebase.Firestore.Timestamp>("createdAt");
+            createdAtSec = (long)(ts.ToDateTime().ToUniversalTime() - System.DateTime.UnixEpoch).TotalSeconds;
+        }
+
+        return new ClassRow
+        {
+            id = id,
+            name = string.IsNullOrWhiteSpace(name) ? "(Unnamed)" : name,
+            code = string.IsNullOrWhiteSpace(code) ? "—" : code,
+            createdAtSeconds = createdAtSec
+        };
+    }
+
+    private void UpsertRow(Dictionary<string, ClassRow> map, ClassRow incoming)
+    {
+        if (string.IsNullOrEmpty(incoming.id))
+            return;
+
+        if (!map.TryGetValue(incoming.id, out var existing))
+        {
+            map[incoming.id] = incoming;
+            return;
+        }
+
+        if (IsWeakName(existing.name) && !IsWeakName(incoming.name))
+            existing.name = incoming.name;
+
+        if (IsWeakCode(existing.code) && !IsWeakCode(incoming.code))
+            existing.code = incoming.code;
+
+        if (incoming.createdAtSeconds > existing.createdAtSeconds)
+            existing.createdAtSeconds = incoming.createdAtSeconds;
+
+        map[incoming.id] = existing;
+    }
+
+    private bool IsWeakName(string value)
+    {
+        return string.IsNullOrWhiteSpace(value) || value == "(Unnamed)";
+    }
+
+    private bool IsWeakCode(string value)
+    {
+        return string.IsNullOrWhiteSpace(value) || value == "—";
+    }
+
+    private IEnumerator RepairTeacherIndexRow(string teacherUid, ClassRow row)
+    {
+        if (string.IsNullOrEmpty(teacherUid) || string.IsNullOrEmpty(row.id))
+            yield break;
+
+        var createdAt = row.createdAtSeconds > 0
+            ? Timestamp.FromDateTime(System.DateTime.UnixEpoch.AddSeconds(row.createdAtSeconds).ToUniversalTime())
+            : Timestamp.GetCurrentTimestamp();
+
+        var data = new Dictionary<string, object>
+        {
+            { "id", row.id },
+            { "name", string.IsNullOrWhiteSpace(row.name) ? "(Unnamed)" : row.name },
+            { "code", string.IsNullOrWhiteSpace(row.code) ? "—" : row.code },
+            { "createdAt", createdAt }
+        };
+
+        var idxRef = db.Collection("users").Document(teacherUid).Collection("classes").Document(row.id);
+        var repairTask = idxRef.SetAsync(data, SetOptions.MergeAll);
+        yield return new WaitUntil(() => repairTask.IsCompleted);
+
+        if (repairTask.IsFaulted || repairTask.IsCanceled)
+            Debug.LogWarning("[TCM] Failed to repair teacher class index for " + row.id + ": " + repairTask.Exception);
+    }
+
     // Update Join/Edit button visibility based on selection
     private void UpdateButtonVisibility()
     {
@@ -296,90 +965,249 @@ public class TeacherClassManager : MonoBehaviour
         if (editBtn) editBtn.gameObject.SetActive(hasSelection);
     }
 
-    // Render current page of class list
     private void RenderPage()
     {
-        foreach (Transform c in classListContainer) Destroy(c.gameObject); // clear existing
+        Debug.Log($"[TCM] RenderPage — container={classListContainer}, " +
+                  $"parent={classListContainer?.parent?.name}, " +
+                  $"count={_all.Count}");
 
-        // Show "no classes" graphic if needed
+        foreach (Transform c in classListContainer) Destroy(c.gameObject);
+
         bool hasAny = _all.Count > 0;
         if (emptyListGraphic) emptyListGraphic.SetActive(!hasAny);
 
-        int pageCount = Mathf.Max(1, Mathf.CeilToInt(_all.Count / (float)pageSize)); // at least 1 page 
-        _pageIndex = Mathf.Clamp(_pageIndex, 0, pageCount - 1); // clamp page index
+        int pageCount = Mathf.Max(1, Mathf.CeilToInt(_all.Count / (float)pageSize));
+        _pageIndex = Mathf.Clamp(_pageIndex, 0, pageCount - 1);
 
-        // Render items for current page
         int start = _pageIndex * pageSize;
         int end   = Mathf.Min(start + pageSize, _all.Count);
 
-        // Instantiate class items
         for (int i = start; i < end; i++)
         {
             var row = _all[i];
-            var go = Instantiate(classListItemPrefab, classListContainer); // create item
-
-            // Bind texts
-            var nameTxt = go.transform.Find("ClassName")?.GetComponent<TMP_Text>();
-            var codeTxt = go.transform.Find("ClassCode")?.GetComponent<TMP_Text>();
-            if (nameTxt) nameTxt.text = row.name;
-            if (codeTxt) codeTxt.text = $"Code: {row.code}";
-
-            // Ensure an Image to tint for highlight
-            var bg = go.GetComponent<Image>();
-            if (!bg) bg = go.AddComponent<Image>();
-            bg.raycastTarget = true;
-
-            // Ensure a Button to receive clicks
-            var btn = go.GetComponent<Button>();
-            if (!btn) btn = go.AddComponent<Button>();
-            if (btn.targetGraphic == null) btn.targetGraphic = bg;
-
-            // Highlight color
             bool isSelected = (row.id == _selectedClassId);
-            bg.color = isSelected ? selectedColor : unselectedColor;
 
-            // Click card to select
+            var go = CreateClassCard(row.name, row.code, isSelected);
+            go.name = "ClassCard_" + row.id;
+            go.transform.SetParent(classListContainer, false);
+            go.SetActive(true);
+            EnsureCardHasSize(go.GetComponent<RectTransform>());
+
             int capturedI = i;
             var capturedId = row.id;
             var capturedName = row.name;
             var capturedCode = row.code;
 
-            // Clear previous listeners
+            var btn = go.GetComponent<Button>();
             btn.onClick.RemoveAllListeners();
-
-            // Add new listener
             btn.onClick.AddListener(() =>
             {
-                // If this card is already selected → unselect it
                 if (_selectedClassId == capturedId)
                 {
                     _selectedClassId = null;
                     _selectedIndex   = -1;
-
-                    // Optional: clear global selection too
                     ClassSelection.CurrentClassId   = null;
                     ClassSelection.CurrentClassName = null;
                     ClassSelection.CurrentClassCode = null;
                 }
                 else
                 {
-                    // Otherwise select this card
                     _selectedClassId = capturedId;
                     _selectedIndex   = capturedI;
-
                     ClassSelection.CurrentClassId   = capturedId;
                     ClassSelection.CurrentClassName = capturedName;
                     ClassSelection.CurrentClassCode = capturedCode;
                 }
 
                 UpdateButtonVisibility();
-                RenderPage(); // re-tint all tiles with new selection state
+                RenderPage();
             });
+
+            Debug.Log($"[TCM] Card created: '{row.name}' active={go.activeSelf} " +
+                      $"parentActive={go.transform.parent?.gameObject.activeInHierarchy}");
         }
 
         if (prevPageBtn) prevPageBtn.interactable = (_pageIndex > 0);
         if (nextPageBtn) nextPageBtn.interactable = (_pageIndex < pageCount - 1);
         if (pageLabel) pageLabel.text = $"Page {_pageIndex + 1} of {pageCount}";
+
+        if (classListContainer is RectTransform containerRt)
+            LayoutRebuilder.ForceRebuildLayoutImmediate(containerRt);
+    }
+
+    private GameObject CreateClassCard(string className, string code, bool selected)
+    {
+        var card = new GameObject("ClassCard", typeof(RectTransform));
+        card.layer = 5;
+
+        var rt = card.GetComponent<RectTransform>();
+        rt.anchorMin = new Vector2(0f, 1f);
+        rt.anchorMax = new Vector2(1f, 1f);
+        rt.pivot = new Vector2(0.5f, 1f);
+        rt.sizeDelta = new Vector2(0f, classCardHeight);
+
+        var le = card.AddComponent<LayoutElement>();
+        le.minHeight = classCardHeight;
+        le.preferredHeight = classCardHeight;
+        le.flexibleHeight = 0f;
+        le.minWidth = fallbackClassCardWidth;
+        le.preferredWidth = fallbackClassCardWidth;
+        le.flexibleWidth = 1;
+
+        var bg = card.AddComponent<Image>();
+        bg.sprite = GetSolidUiSprite();
+        bg.type = Image.Type.Simple;
+        bg.color = selected ? rowFillHighlight : rowFill;
+        bg.raycastTarget = true;
+        bg.maskable = false;
+
+        var shadow = card.AddComponent<Shadow>();
+        shadow.effectColor = shadowColor;
+        shadow.effectDistance = new Vector2(0f, -3f);
+
+        var outline = card.AddComponent<Outline>();
+        outline.effectColor = selected ? new Color(1f, 0.95f, 0.82f, 0.45f) : outlineColor;
+        outline.effectDistance = new Vector2(1.5f, -1.5f);
+
+        var btn = card.AddComponent<Button>();
+        btn.targetGraphic = bg;
+        btn.transition = Selectable.Transition.ColorTint;
+        var cb = ColorBlock.defaultColorBlock;
+        cb.normalColor = Color.white;
+        cb.highlightedColor = Color.white;
+        cb.pressedColor = Color.white;
+        cb.selectedColor = Color.white;
+        cb.disabledColor = new Color(1f, 1f, 1f, 0.55f);
+        cb.colorMultiplier = 1f;
+        cb.fadeDuration = 0.08f;
+        btn.colors = cb;
+
+        const float accentW = 6f;
+        var accentGo = new GameObject("Accent");
+        accentGo.transform.SetParent(card.transform, false);
+        var accentRt = accentGo.AddComponent<RectTransform>();
+        accentRt.anchorMin = new Vector2(0f, 0f);
+        accentRt.anchorMax = new Vector2(0f, 1f);
+        accentRt.pivot = new Vector2(0f, 0.5f);
+        accentRt.offsetMin = new Vector2(3f, 6f);
+        accentRt.offsetMax = new Vector2(3f + accentW, -6f);
+        var accentImg = accentGo.AddComponent<Image>();
+        accentImg.sprite = GetSolidUiSprite();
+        accentImg.color = selected ? new Color(1f, 0.9f, 0.64f, 0.95f) : accentBarColor;
+        accentImg.raycastTarget = false;
+        accentImg.maskable = false;
+
+        var chevronGo = new GameObject("Chevron");
+        chevronGo.transform.SetParent(card.transform, false);
+        var chevRt = chevronGo.AddComponent<RectTransform>();
+        chevRt.anchorMin = new Vector2(1f, 0f);
+        chevRt.anchorMax = new Vector2(1f, 1f);
+        chevRt.pivot = new Vector2(1f, 0.5f);
+        chevRt.sizeDelta = new Vector2(40f, 0f);
+        chevRt.anchoredPosition = new Vector2(-10f, 0f);
+        var chev = chevronGo.AddComponent<TextMeshProUGUI>();
+        chev.text = "\u203A";
+        chev.fontSize = 40f;
+        chev.fontStyle = FontStyles.Normal;
+        chev.color = chevronColor;
+        chev.alignment = TextAlignmentOptions.MidlineRight;
+        chev.raycastTarget = false;
+        chev.maskable = false;
+        chev.enableAutoSizing = false;
+        ApplyCardFont(chev);
+
+        var textBlock = new GameObject("TextBlock");
+        textBlock.transform.SetParent(card.transform, false);
+        var tbRt = textBlock.AddComponent<RectTransform>();
+        tbRt.anchorMin = Vector2.zero;
+        tbRt.anchorMax = Vector2.one;
+        float textLeft = 3f + accentW + 12f;
+        float textRight = 46f;
+        tbRt.offsetMin = new Vector2(textLeft, 10f);
+        tbRt.offsetMax = new Vector2(-textRight, -10f);
+
+        var vlg = textBlock.AddComponent<VerticalLayoutGroup>();
+        vlg.spacing = 2f;
+        vlg.childAlignment = TextAnchor.UpperLeft;
+        vlg.childControlWidth = true;
+        vlg.childControlHeight = true;
+        vlg.childForceExpandWidth = true;
+        vlg.childForceExpandHeight = false;
+        vlg.padding = new RectOffset(0, 0, 2, 0);
+
+        var titleGo = new GameObject("Title");
+        titleGo.transform.SetParent(textBlock.transform, false);
+        var titleLe = titleGo.AddComponent<LayoutElement>();
+        titleLe.preferredHeight = 38f;
+        titleLe.flexibleHeight = 0f;
+        var titleTmp = titleGo.AddComponent<TextMeshProUGUI>();
+        titleTmp.text = className;
+        titleTmp.fontSize = 26f;
+        titleTmp.fontStyle = FontStyles.Bold;
+        titleTmp.color = selected ? Color.white : titleColor;
+        titleTmp.alignment = TextAlignmentOptions.Left;
+        titleTmp.textWrappingMode = TextWrappingModes.NoWrap;
+        titleTmp.overflowMode = TextOverflowModes.Ellipsis;
+        titleTmp.raycastTarget = false;
+        titleTmp.maskable = false;
+        ApplyCardFont(titleTmp);
+
+        var subGo = new GameObject("Subtitle");
+        subGo.transform.SetParent(textBlock.transform, false);
+        var subLe = subGo.AddComponent<LayoutElement>();
+        subLe.preferredHeight = 24f;
+        subLe.flexibleHeight = 0f;
+        var subTmp = subGo.AddComponent<TextMeshProUGUI>();
+        subTmp.text = $"Code: {code}";
+        subTmp.fontSize = 17f;
+        subTmp.fontStyle = FontStyles.Normal;
+        subTmp.color = selected ? new Color(1f, 1f, 1f, 0.85f) : subtitleColor;
+        subTmp.alignment = TextAlignmentOptions.Left;
+        subTmp.textWrappingMode = TextWrappingModes.NoWrap;
+        subTmp.overflowMode = TextOverflowModes.Ellipsis;
+        subTmp.raycastTarget = false;
+        subTmp.maskable = false;
+        ApplyCardFont(subTmp);
+
+        return card;
+    }
+
+    private void EnsureCardHasSize(RectTransform rt)
+    {
+        if (rt == null)
+            return;
+
+        float containerWidth = 0f;
+        if (classListContainer is RectTransform containerRt)
+            containerWidth = containerRt.rect.width;
+
+        float targetWidth = containerWidth > 1f ? containerWidth : fallbackClassCardWidth;
+
+        rt.SetInsetAndSizeFromParentEdge(RectTransform.Edge.Left, 0f, targetWidth);
+        rt.SetInsetAndSizeFromParentEdge(RectTransform.Edge.Top, 0f, classCardHeight);
+
+        if (rt.sizeDelta.y < 1f)
+            rt.sizeDelta = new Vector2(rt.sizeDelta.x, classCardHeight);
+    }
+
+    private void ApplyCardFont(TextMeshProUGUI tmp)
+    {
+        if (tmp != null && cardFont != null)
+            tmp.font = cardFont;
+    }
+
+    private static Sprite GetSolidUiSprite()
+    {
+        if (_solidUiSprite != null)
+            return _solidUiSprite;
+
+        var tex = Texture2D.whiteTexture;
+        _solidUiSprite = Sprite.Create(
+            tex,
+            new Rect(0, 0, tex.width, tex.height),
+            new Vector2(0.5f, 0.5f),
+            100f);
+        return _solidUiSprite;
     }
 
     // Rename class
@@ -450,8 +1278,25 @@ public class TeacherClassManager : MonoBehaviour
     // Sign out and return to WelcomePage
     public void SignOut()
     {
+        ClassSelection.ClearForSignOut();
         auth.SignOut();
         SceneManager.LoadScene("WelcomePage");
+    }
+
+    public void BackToClassSelect()
+    {
+        SceneManager.LoadScene("TeacherClassSelect");
+    }
+
+    public void EditList_NoOp()
+    {
+        // Intentionally does nothing for now.
+    }
+
+    // Placeholder for Create Game button until gameplay creation flow is implemented.
+    public void CreateGame_NoOp()
+    {
+        // Intentionally left blank.
     }
 
     // helpers
@@ -460,4 +1305,6 @@ public class TeacherClassManager : MonoBehaviour
         if (string.IsNullOrEmpty(_selectedClassId)) return default;
         return _all.Find(r => r.id == _selectedClassId);
     }
+
 }
+

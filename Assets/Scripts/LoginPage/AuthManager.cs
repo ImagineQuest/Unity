@@ -1,3 +1,7 @@
+// Script: AuthManager
+// Path: Assets/Scripts/LoginPage/AuthManager.cs
+// Purpose: Handles login/signup flow and Firebase authentication state.
+
 using System.Collections; 
 using UnityEngine;
 using UnityEngine.UI;
@@ -43,16 +47,151 @@ public class AuthManager : MonoBehaviour
     public TMP_InputField TpasswordRegisterVerifyField;
     public Toggle isTeacherToggle;
     public TMP_Text TwarningRegisterText;
+    private Toggle studentRoleToggle;
+    private ToggleGroup roleToggleGroup;
+    private bool roleListenersBound;
+    private GameObject studentSignupPanel;
+    private GameObject teacherSignupPanel;
 
     // Firestore
     public FirebaseFirestore db;
 
     // Where we normalize usernames (trim + lowercase)
     private static string Key(string s) => string.IsNullOrWhiteSpace(s) ? "" : s.Trim().ToLowerInvariant();
+    private IEnumerator Start()
+    {
+        ResolveSignupPanels();
+        ApplySignupPanelState();
+        yield return null;
+    }
+
+    private void ResolveSignupPanels()
+    {
+        if (studentSignupPanel == null)
+            studentSignupPanel = FindSceneObjectIncludingInactive("StudentUI");
+        if (teacherSignupPanel == null)
+            teacherSignupPanel = FindSceneObjectIncludingInactive("TeacherUI");
+    }
+
+    private static GameObject FindSceneObjectIncludingInactive(string objectName)
+    {
+        if (string.IsNullOrEmpty(objectName))
+            return null;
+
+        GameObject activeObj = GameObject.Find(objectName);
+        if (activeObj != null)
+            return activeObj;
+
+        Transform[] allTransforms = Resources.FindObjectsOfTypeAll<Transform>();
+        for (int i = 0; i < allTransforms.Length; i++)
+        {
+            Transform t = allTransforms[i];
+            if (t == null || t.hideFlags != HideFlags.None)
+                continue;
+            if (!t.gameObject.scene.IsValid())
+                continue;
+            if (t.name == objectName)
+                return t.gameObject;
+        }
+        return null;
+    }
+
+    private void ApplySignupPanelState()
+    {
+        ResolveSignupPanels();
+
+        bool teacherSelected = isTeacherToggle != null && isTeacherToggle.isOn;
+        bool studentSelected = studentRoleToggle != null && studentRoleToggle.isOn;
+        if (studentRoleToggle == null)
+            studentSelected = !teacherSelected;
+
+        if (teacherSignupPanel != null)
+            teacherSignupPanel.SetActive(teacherSelected);
+        if (studentSignupPanel != null)
+            studentSignupPanel.SetActive(studentSelected);
+    }
+
+    private void EnsureRoleToggleExclusivity()
+    {
+        if (isTeacherToggle == null || isTeacherToggle.transform.parent == null)
+        {
+            return;
+        }
+
+        Toggle[] toggles = isTeacherToggle.transform.parent.GetComponentsInChildren<Toggle>(true);
+        studentRoleToggle = null;
+        for (int i = 0; i < toggles.Length; i++)
+        {
+            if (toggles[i] != null && toggles[i] != isTeacherToggle)
+            {
+                studentRoleToggle = toggles[i];
+                break;
+            }
+        }
+
+        GameObject groupHost = isTeacherToggle.transform.parent.gameObject;
+        roleToggleGroup = groupHost.GetComponent<ToggleGroup>();
+        if (roleToggleGroup == null)
+        {
+            roleToggleGroup = groupHost.AddComponent<ToggleGroup>();
+        }
+        roleToggleGroup.allowSwitchOff = false;
+
+        for (int i = 0; i < toggles.Length; i++)
+        {
+            Toggle t = toggles[i];
+            if (t == null) continue;
+            t.group = roleToggleGroup;
+        }
+
+        // Normalize startup state in case multiple toggles were on before grouping.
+        if (studentRoleToggle != null && isTeacherToggle.isOn && studentRoleToggle.isOn)
+        {
+            studentRoleToggle.SetIsOnWithoutNotify(false);
+        }
+        else if (!isTeacherToggle.isOn && (studentRoleToggle == null || !studentRoleToggle.isOn))
+        {
+            if (studentRoleToggle != null)
+                studentRoleToggle.SetIsOnWithoutNotify(true);
+            else
+                isTeacherToggle.SetIsOnWithoutNotify(true);
+        }
+
+        if (!roleListenersBound)
+        {
+            isTeacherToggle.onValueChanged.AddListener(OnTeacherToggleChanged);
+            if (studentRoleToggle != null)
+            {
+                studentRoleToggle.onValueChanged.AddListener(OnStudentToggleChanged);
+            }
+            roleListenersBound = true;
+        }
+
+        ApplySignupPanelState();
+    }
+
+    private void OnTeacherToggleChanged(bool isOn)
+    {
+        if (isOn && studentRoleToggle != null && studentRoleToggle.isOn)
+        {
+            studentRoleToggle.SetIsOnWithoutNotify(false);
+        }
+        ApplySignupPanelState();
+    }
+
+    private void OnStudentToggleChanged(bool isOn)
+    {
+        if (isOn && isTeacherToggle != null && isTeacherToggle.isOn)
+        {
+            isTeacherToggle.SetIsOnWithoutNotify(false);
+        }
+        ApplySignupPanelState();
+    }
 
     // Initialize Firebase
     void Awake()
     {
+        EnsureRoleToggleExclusivity();
         //Check that all of the necessary dependencies for Firebase are present on the system
         FirebaseApp.CheckAndFixDependenciesAsync().ContinueWith(task =>
         {
@@ -166,14 +305,28 @@ public class AuthManager : MonoBehaviour
         // Check if document exists and get role
         if (userDocTask.Result.Exists)
         {
+            ImagineQuest.Gameplay.StudentAvatarIdentity.Cache(User.UserId,
+                userDocTask.Result.ContainsField("avatarId") ? userDocTask.Result.GetValue<string>("avatarId") : "navigator",
+                userDocTask.Result.ContainsField("characterColor") ? userDocTask.Result.GetValue<string>("characterColor") : "FFFFFF");
             string role = userDocTask.Result.GetValue<string>("role"); // get role
             Debug.Log("User role: " + role);
 
             // Redirect based on role
             if (role == "teacher")
-                SceneManager.LoadScene("TeacherClassSelect");
+            {
+                SceneTransition.LoadScene("TeacherClassSelect");
+            }
             else
-                SceneManager.LoadScene("StudentCharacterSelect");
+            {   
+                bool avatarChosen = false;
+                if (userDocTask.Result.ContainsField("avatarChosen"))
+                    avatarChosen = userDocTask.Result.GetValue<bool>("avatarChosen");
+                if (avatarChosen)
+                    SceneTransition.LoadScene("StudentHub");
+                else
+                    SceneTransition.LoadScene("StudentAvatarSelect");
+                    
+        }
         }
         // Document does not exist
         else
@@ -210,6 +363,13 @@ public class AuthManager : MonoBehaviour
             Debug.Log("[Register] Checking usernames/" + unameKey); // debug
             var nameCheckTask = db.Collection("usernames").Document(unameKey).GetSnapshotAsync(); // check username
             yield return new WaitUntil(() => nameCheckTask.IsCompleted); // wait for task to complete
+
+            if (nameCheckTask.IsFaulted || nameCheckTask.IsCanceled)
+            {
+                Debug.LogError("[Register] Failed checking username: " + nameCheckTask.Exception);
+                TwarningRegisterText.text = "Firestore permissions blocked signup.";
+                yield break;
+            }
             
             // check if username exists
             if (nameCheckTask.Result.Exists)
@@ -261,12 +421,17 @@ public class AuthManager : MonoBehaviour
             // wait for both writes to complete
             yield return new WaitUntil(() => userDocTask.IsCompleted && mapDocTask.IsCompleted);
 
-            // Show success message
+            if (userDocTask.IsFaulted || userDocTask.IsCanceled || mapDocTask.IsFaulted || mapDocTask.IsCanceled)
+            {
+                Debug.LogError("[Register] Failed writing teacher profile/map docs.");
+                TwarningRegisterText.text = "Account created, but profile save failed (rules).";
+                yield break;
+            }
+
             if (TwarningRegisterText != null)
                 TwarningRegisterText.text = "Account successfully created!";
-            
-            // implement back to login
-            // UIManager.instance.LoginScreen();
+
+            SceneTransition.LoadScene("TeacherClassSelect");
         }
         else
         {
@@ -288,6 +453,14 @@ public class AuthManager : MonoBehaviour
             Debug.Log("[Register] Checking usernames/" + unameKey); // debug
             var nameCheckTask = db.Collection("usernames").Document(unameKey).GetSnapshotAsync(); // check username
             yield return new WaitUntil(() => nameCheckTask.IsCompleted);
+
+            if (nameCheckTask.IsFaulted || nameCheckTask.IsCanceled)
+            {
+                Debug.LogError("[Register] Failed checking username: " + nameCheckTask.Exception);
+                warningRegisterText.text = "Firestore permissions blocked signup.";
+                yield break;
+            }
+
             if (nameCheckTask.Result.Exists)
             {
                 warningRegisterText.text = "Username already taken";
@@ -321,7 +494,9 @@ public class AuthManager : MonoBehaviour
                 { "firstName", fname },
                 { "lastName", lname },
                 { "email", syntheticEmail }, // synthetic
-                { "role", "student" }
+                { "role", "student" },
+                { "avatarId", "" },
+                { "avatarChosen", false }
             };
 
             Debug.Log("[Register] Writing users/" + user.UserId);
@@ -337,12 +512,17 @@ public class AuthManager : MonoBehaviour
 
             yield return new WaitUntil(() => userDocTask.IsCompleted && mapDocTask.IsCompleted); // wait for writes
 
-            // Show success message
+            if (userDocTask.IsFaulted || userDocTask.IsCanceled || mapDocTask.IsFaulted || mapDocTask.IsCanceled)
+            {
+                Debug.LogError("[Register] Failed writing student profile/map docs.");
+                warningRegisterText.text = "Account created, but profile save failed (rules).";
+                yield break;
+            }
+
             if (warningRegisterText != null)
                 warningRegisterText.text = "Account successfully created!";
 
-            // implement back to login
-            // UIManager.instance.LoginScreen();
+            SceneTransition.LoadScene("StudentAvatarSelect");
         }
     }
 
@@ -368,3 +548,5 @@ public class AuthManager : MonoBehaviour
         uiLabel.text = msg;
     }
 }
+
+
